@@ -59,7 +59,8 @@ public final class TrafficInspector {
 
 extension TrafficInspector: TrafficURLProtocolEventSink {
     public func record(_ event: TrafficEvent) {
-        queue.sync {
+        // Phase 1: state mutations + packet build (under lock)
+        let pending: (packet: RequestPacket, delegate: TrafficInspectorDelegate?)? = queue.sync {
             switch event.kind {
             case .start(let method, let headers, let body):
                 byURL[event.url] = Accum(
@@ -70,28 +71,34 @@ extension TrafficInspector: TrafficURLProtocolEventSink {
                     response: nil,
                     body: Data()
                 )
-                sendPacket(for: event.url)
+                return buildPacket(for: event.url).map { ($0, delegate) }
             case .response(let resp):
-                guard var acc = byURL[event.url] else { return }
+                guard var acc = byURL[event.url] else { return nil }
                 acc.response = resp
                 byURL[event.url] = acc
-                sendPacket(for: event.url)
+                return buildPacket(for: event.url).map { ($0, delegate) }
             case .data(let d):
-                guard var acc = byURL[event.url] else { return }
+                guard var acc = byURL[event.url] else { return nil }
                 acc.body.append(d)
                 byURL[event.url] = acc
+                return nil
             case .finish:
-                sendPacket(for: event.url, complete: true)
+                let result = buildPacket(for: event.url, complete: true).map { ($0, delegate) }
                 byURL.removeValue(forKey: event.url)
+                return result
             }
+        }
+        // Phase 2: delegate callback + network send (no lock held for delegate)
+        if let pending {
+            dispatchPacket(pending.packet, delegate: pending.delegate)
         }
     }
 
-    private func sendPacket(for url: URL, complete: Bool = false) {
-        guard let acc = byURL[url] else { return }
-        
-        // Convert response headers from [String: Any] to [String: String]
-        var responseHeaders: [String: String]? = nil
+    /// Builds a RequestPacket from current state. Must be called from inside queue.sync.
+    private func buildPacket(for url: URL, complete: Bool = false) -> RequestPacket? {
+        guard let acc = byURL[url] else { return nil }
+
+        var responseHeaders: [String: String]?
         if let httpResponse = acc.response as? HTTPURLResponse {
             responseHeaders = [:]
             for (key, value) in httpResponse.allHeaderFields {
@@ -99,13 +106,12 @@ extension TrafficInspector: TrafficURLProtocolEventSink {
                     if let valueString = value as? String {
                         responseHeaders?[keyString] = valueString
                     } else {
-                        // Convert non-string values to string
                         responseHeaders?[keyString] = String(describing: value)
                     }
                 }
             }
         }
-        
+
         let info = RequestInfo(
             url: url,
             requestHeaders: acc.requestHeaders,
@@ -117,27 +123,31 @@ extension TrafficInspector: TrafficURLProtocolEventSink {
             startDate: acc.start,
             endDate: complete ? Date() : nil
         )
-        let packet = RequestPacket(packetId: UUID().uuidString, requestInfo: info, project: configuration.project, device: configuration.device)
-        
+        return RequestPacket(packetId: UUID().uuidString, requestInfo: info, project: configuration.project, device: configuration.device)
+    }
+
+    /// Delegate callback runs outside any lock (re-entrant record() is safe). Network send + counters under lock.
+    private func dispatchPacket(_ packet: RequestPacket, delegate: TrafficInspectorDelegate?) {
         let hasDelegate = delegate != nil
         let delegateResult = delegate?.trafficInspector(self, willSend: packet)
-        
-        if let modified = delegateResult {
-            client.sendPacket(modified)
-            packetsSent += 1
-        } else if hasDelegate {
-            // Delegate returned nil to filter the packet - drop it and increment counter
-            packetsDropped += 1
-        } else {
-            client.sendPacket(packet)
-            packetsSent += 1
+
+        queue.sync {
+            if let modified = delegateResult {
+                client.sendPacket(modified)
+                packetsSent += 1
+            } else if hasDelegate {
+                packetsDropped += 1
+            } else {
+                client.sendPacket(packet)
+                packetsSent += 1
+            }
         }
     }
 }
 
 extension TrafficInspector: ServiceBrowserDelegate {
     public func serviceBrowser(_ browser: ServiceBrowser, didFindService service: NetService) {
-        client.setService(service)
+        queue.sync { client.setService(service) }
     }
     public func serviceBrowser(_ browser: ServiceBrowser, didRemoveService service: NetService) {}
     public func serviceBrowser(_ browser: ServiceBrowser, didFailWithError error: Error) {}

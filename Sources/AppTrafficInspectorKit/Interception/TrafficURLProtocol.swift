@@ -147,11 +147,13 @@ public final class TrafficURLProtocol: URLProtocol {
             if let data = data {
                 let limit = Self.maxBodyBytes ?? data.count
                 let limitedData = data.prefix(limit)
-                self.responseData = Data(limitedData)
-                self.receivedBytes += limitedData.count
-                
+                self.responseData = data
+                self.receivedBytes += data.count
+                // Forward full response to the app; only record limited data for inspection.
+                if !data.isEmpty {
+                    self.client?.urlProtocol(self, didLoad: data)
+                }
                 if !limitedData.isEmpty {
-                    self.client?.urlProtocol(self, didLoad: Data(limitedData))
                     Self.eventSink?.record(TrafficEvent(url: url, kind: .data(Data(limitedData))))
                 }
             }
@@ -171,11 +173,13 @@ public final class TrafficURLProtocol: URLProtocol {
 
         let fullBody = Data([0x41, 0x42, 0x43, 0x44, 0x45]) // ABCDE
         let limit = Self.maxBodyBytes ?? fullBody.count
-        let body = fullBody.prefix(limit)
-        receivedBytes += body.count
-        if !body.isEmpty {
-            client?.urlProtocol(self, didLoad: body)
-            Self.eventSink?.record(TrafficEvent(url: url, kind: .data(Data(body))))
+        let limitedData = fullBody.prefix(limit)
+        receivedBytes += fullBody.count
+        if !fullBody.isEmpty {
+            client?.urlProtocol(self, didLoad: fullBody)
+        }
+        if !limitedData.isEmpty {
+            Self.eventSink?.record(TrafficEvent(url: url, kind: .data(Data(limitedData))))
         }
 
         client?.urlProtocolDidFinishLoading(self)

@@ -89,6 +89,24 @@ struct TrafficInspectorTests {
     }
     
     @MainActor @Test
+    func delegateReenteringRecord_doesNotDeadlock() throws {
+        let conn = CollectingConnection()
+        let scheduler = RecordingScheduler()
+        let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: scheduler)
+        client.setService(makeDummyService())
+        let inspector = TrafficInspector(configuration: Configuration(), client: client)
+        let reentrantDelegate = ReentrantDelegate()
+        inspector.delegate = reentrantDelegate
+
+        let testURL = URL(string: "https://example.com/outer")!
+        inspector.record(TrafficEvent(url: testURL, kind: .start(requestMethod: "GET", requestHeaders: [:], requestBody: nil)))
+        inspector.record(TrafficEvent(url: testURL, kind: .finish))
+
+        #expect(reentrantDelegate.didReenter, "Delegate should have re-entered record()")
+        #expect(conn.frames.count >= 2, "Both outer and inner request packets should be sent without deadlock")
+    }
+
+    @MainActor @Test
     func noDelegateSendsOriginalPacket() throws {
         let conn = CollectingConnection()
         let scheduler = RecordingScheduler()
