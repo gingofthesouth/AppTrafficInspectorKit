@@ -20,7 +20,6 @@
 
 import Foundation
 
-@MainActor
 public protocol ServiceBrowserDelegate: AnyObject {
     func serviceBrowser(_ browser: ServiceBrowser, didFindService service: NetService)
     func serviceBrowser(_ browser: ServiceBrowser, didRemoveService service: NetService)
@@ -41,12 +40,10 @@ public final class ServiceBrowser: NSObject, @unchecked Sendable {
         self.browser.delegate = self
     }
 
-    @MainActor
     public func startBrowsing() {
         browser.searchForServices(ofType: serviceType, inDomain: domain)
     }
 
-    @MainActor
     public func stopBrowsing() {
         browser.stop()
     }
@@ -83,9 +80,8 @@ extension ServiceBrowser: NetServiceBrowserDelegate {
 #if DEBUG
 extension ServiceBrowser {
     // Test helpers to simulate events
-    @MainActor
     func _simulateDidFind(_ service: NetService) { delegate?.serviceBrowser(self, didFindService: service) }
-    @MainActor
     func _simulateDidRemove(_ service: NetService) { delegate?.serviceBrowser(self, didRemoveService: service) }
+    func _simulateDidFail(_ error: Error) { delegate?.serviceBrowser(self, didFailWithError: error) }
 }
 #endif

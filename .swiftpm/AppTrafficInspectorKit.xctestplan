@@ -1,0 +1,24 @@
+{
+  "configurations" : [
+    {
+      "id" : "807ED24C-77B9-4115-8640-15F6956FECE0",
+      "name" : "Test Scheme Action",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "performanceAntipatternCheckerEnabled" : true
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:",
+        "identifier" : "AppTrafficInspectorKitTests",
+        "name" : "AppTrafficInspectorKitTests"
+      }
+    }
+  ],
+  "version" : 1
+}
