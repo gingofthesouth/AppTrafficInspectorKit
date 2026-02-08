@@ -79,7 +79,14 @@ extension TrafficInspector: TrafficURLProtocolEventSink {
                 return buildPacket(for: event.url).map { ($0, delegate) }
             case .data(let d):
                 guard var acc = byURL[event.url] else { return nil }
-                acc.body.append(d)
+                if let limit = configuration.maxBodyBytes {
+                    let remaining = limit - acc.body.count
+                    if remaining > 0 {
+                        acc.body.append(Data(d.prefix(remaining)))
+                    }
+                } else {
+                    acc.body.append(d)
+                }
                 byURL[event.url] = acc
                 return nil
             case .finish:

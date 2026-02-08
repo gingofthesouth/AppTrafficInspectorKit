@@ -79,25 +79,24 @@ struct ErrorHandlingTests {
         let conn = CollectingConnection()
         let scheduler = RecordingScheduler()
         let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: scheduler)
+        client.setService(makeDummyService())
         let config = Configuration(maxBodyBytes: 100)
         let inspector = TrafficInspector(configuration: config, client: client)
         
         let testURL = URL(string: "https://example.com/large")!
         inspector.record(TrafficEvent(url: testURL, kind: .start(requestMethod: "GET", requestHeaders: [:], requestBody: nil)))
         
-        // Send large data chunk
+        // Send large data chunk directly (bypasses TrafficURLProtocol); inspector must still cap at maxBodyBytes
         let largeData = Data(repeating: 0x42, count: 1000)
         inspector.record(TrafficEvent(url: testURL, kind: .data(largeData)))
         inspector.record(TrafficEvent(url: testURL, kind: .finish))
         
-        // Verify body is limited
-        if let finishFrame = conn.frames.last {
-            let payload = Data(finishFrame.dropFirst(8))
-            let packet = try PacketJSON.decoder.decode(RequestPacket.self, from: payload)
-            if let responseData = packet.requestInfo.responseData {
-                #expect(responseData.count <= 100)
-            }
-        }
+        #expect(conn.frames.isEmpty == false, "Packet should be sent when service is set")
+        let finishFrame = try #require(conn.frames.last)
+        let payload = Data(finishFrame.dropFirst(8))
+        let packet = try PacketJSON.decoder.decode(RequestPacket.self, from: payload)
+        let responseData = try #require(packet.requestInfo.responseData, "Finish packet should include responseData")
+        #expect(responseData.count <= 100, "responseData should be capped at maxBodyBytes (100)")
     }
     
     @MainActor
