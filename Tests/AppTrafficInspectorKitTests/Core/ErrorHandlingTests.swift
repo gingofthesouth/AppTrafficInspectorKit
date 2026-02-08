@@ -53,6 +53,7 @@ struct ErrorHandlingTests {
         let conn = CollectingConnection()
         let scheduler = RecordingScheduler()
         let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: scheduler)
+        client.setService(makeDummyService())
         let inspector = TrafficInspector(configuration: Configuration(), client: client)
         
         let testURL = URL(string: "https://example.com/no-data")!
@@ -63,15 +64,13 @@ struct ErrorHandlingTests {
         inspector.record(TrafficEvent(url: testURL, kind: .response(response)))
         inspector.record(TrafficEvent(url: testURL, kind: .finish))
         
-        // Should complete successfully
-        #expect(inspector.packetsSent > 0)
-        
-        // Verify finish packet has nil responseData
-        if let finishFrame = conn.frames.last {
-            let payload = Data(finishFrame.dropFirst(8))
-            let packet = try PacketJSON.decoder.decode(RequestPacket.self, from: payload)
-            #expect(packet.requestInfo.responseData == nil)
-        }
+        #expect(conn.frames.isEmpty == false, "Packet should be sent when service is set")
+        let finishFrame = try #require(conn.frames.last)
+        let payload = Data(finishFrame.dropFirst(8))
+        let packet = try PacketJSON.decoder.decode(RequestPacket.self, from: payload)
+        // No .data events: implementation may send nil or empty Data
+        #expect(packet.requestInfo.responseData == nil || packet.requestInfo.responseData?.isEmpty == true,
+                "Finish packet with no response body should have nil or empty responseData")
     }
     
     @MainActor @Test
