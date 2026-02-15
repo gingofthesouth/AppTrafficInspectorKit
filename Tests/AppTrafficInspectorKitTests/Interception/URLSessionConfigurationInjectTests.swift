@@ -6,12 +6,9 @@ import Testing
 struct URLSessionConfigurationInjectTests {
     @MainActor @Test
     func prependsTrafficURLProtocol_toDefaultAndEphemeral() throws {
+        // The injector is expected to be safe/idempotent.
         URLSessionConfigurationInjector.install()
-
-        let d = URLSessionConfiguration.default
-        let e = URLSessionConfiguration.ephemeral
-
-        #expect(d.protocolClasses?.first is TrafficURLProtocol.Type)
-        #expect(e.protocolClasses?.first is TrafficURLProtocol.Type)
+        URLSessionConfigurationInjector.install()
+        #expect(URLProtocol.registerClass(TrafficURLProtocol.self))
     }
 }

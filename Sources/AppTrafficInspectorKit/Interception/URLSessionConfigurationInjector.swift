@@ -21,48 +21,10 @@
 import Foundation
 
 public enum URLSessionConfigurationInjector {
-    private static let installed: Void = {
-        _ = swizzle(class: URLSessionConfiguration.self, original: #selector(getter: URLSessionConfiguration.default), replacement: #selector(URLSessionConfiguration.appTraffic_default))
-        _ = swizzle(class: URLSessionConfiguration.self, original: #selector(getter: URLSessionConfiguration.ephemeral), replacement: #selector(URLSessionConfiguration.appTraffic_ephemeral))
-    }()
-
-    /// Call from app startup so swizzle runs before any URLSession (e.g. URLSession.shared) is created.
-    public static func runSwizzleIfNeeded() {
-        _ = installed
-    }
-
     @MainActor
     public static func install() {
-        runSwizzleIfNeeded()
-    }
-
-    private static func swizzle(class cls: AnyClass, original: Selector, replacement: Selector) -> Bool {
-        guard let originalMethod = class_getClassMethod(cls, original),
-              let replacementMethod = class_getClassMethod(cls, replacement)
-        else { return false }
-        method_exchangeImplementations(originalMethod, replacementMethod)
-        return true
-    }
-}
-
-extension URLSessionConfiguration {
-    @objc class func appTraffic_default() -> URLSessionConfiguration {
-        let config = appTraffic_default()
-        prependTrafficProtocol(config)
-        return config
-    }
-
-    @objc class func appTraffic_ephemeral() -> URLSessionConfiguration {
-        let config = appTraffic_ephemeral()
-        prependTrafficProtocol(config)
-        return config
-    }
-
-    private static func prependTrafficProtocol(_ config: URLSessionConfiguration) {
-        var protocols = config.protocolClasses ?? []
-        if !(protocols.first is TrafficURLProtocol.Type) {
-            protocols.insert(TrafficURLProtocol.self, at: 0)
-            config.protocolClasses = protocols
-        }
+        // URLSessionConfiguration is a class cluster and swizzling is brittle across OS versions.
+        // Registering the URLProtocol is a more reliable way to have it considered for requests.
+        URLProtocol.registerClass(TrafficURLProtocol.self)
     }
 }

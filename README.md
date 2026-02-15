@@ -30,7 +30,7 @@ Add AppTrafficInspectorKit to your project using Swift Package Manager.
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/yourusername/AppTrafficInspectorKit.git", from: "1.0.0")
+    .package(url: "https://github.com/gingofthesouth/AppTrafficInspectorKit.git", from: "1.0.0")
 ]
 ```
 

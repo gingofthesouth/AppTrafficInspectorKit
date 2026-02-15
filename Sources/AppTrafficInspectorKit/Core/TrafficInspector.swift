@@ -24,27 +24,23 @@ public protocol TrafficInspectorDelegate: AnyObject {
     func trafficInspector(_ inspector: TrafficInspector, willSend packet: RequestPacket) -> RequestPacket?
 }
 
-@MainActor
 public final class TrafficInspector {
     public weak var delegate: TrafficInspectorDelegate?
 
     private let configuration: Configuration
     private let browser: ServiceBrowser
     private let client: NetworkClient
+    private let queue = DispatchQueue(label: "com.apptrafficinspector.trafficInspector")
 
     private struct Accum {
         let packetId: String
-        var url: URL
         var start: Date
-        var response: URLResponse?
-        var body = Data()
-        var requestMethod: String = "GET"
-        var requestHeaders: [String: String] = [:]
+        var requestMethod: String
+        var requestHeaders: [String: String]
         var requestBody: Data?
+        var response: URLResponse?
+        var body: Data
     }
-    /// Keyed by requestId when events provide it (concurrent same-URL requests stay separate).
-    private var byRequestId: [UUID: Accum] = [:]
-    /// Fallback when requestId is nil (e.g. tests); only one in-flight request per URL.
     private var byURL: [URL: Accum] = [:]
 
     public private(set) var packetsSent: Int = 0
@@ -72,116 +68,105 @@ public final class TrafficInspector {
 
 }
 
-@MainActor
 extension TrafficInspector: TrafficURLProtocolEventSink {
     public func record(_ event: TrafficEvent) {
-        if let id = event.requestId {
-            recordByRequestId(event, requestId: id)
-        } else {
-            recordByURL(event)
+        // Phase 1: state mutations + packet build (under lock)
+        let pending: (packet: RequestPacket, delegate: TrafficInspectorDelegate?)? = queue.sync {
+            switch event.kind {
+            case .start(let method, let headers, let body):
+                byURL[event.url] = Accum(
+                    packetId: UUID().uuidString,
+                    start: Date(),
+                    requestMethod: method,
+                    requestHeaders: headers,
+                    requestBody: body,
+                    response: nil,
+                    body: Data()
+                )
+                return buildPacket(for: event.url).map { ($0, delegate) }
+            case .response(let resp):
+                guard var acc = byURL[event.url] else { return nil }
+                acc.response = resp
+                byURL[event.url] = acc
+                return buildPacket(for: event.url).map { ($0, delegate) }
+            case .data(let d):
+                guard var acc = byURL[event.url] else { return nil }
+                if let limit = configuration.maxBodyBytes {
+                    let remaining = limit - acc.body.count
+                    if remaining > 0 {
+                        acc.body.append(Data(d.prefix(remaining)))
+                    }
+                } else {
+                    acc.body.append(d)
+                }
+                byURL[event.url] = acc
+                return nil
+            case .finish:
+                let result = buildPacket(for: event.url, complete: true).map { ($0, delegate) }
+                byURL.removeValue(forKey: event.url)
+                return result
+            }
+        }
+        // Phase 2: delegate callback + network send (no lock held for delegate)
+        if let pending {
+            dispatchPacket(pending.packet, delegate: pending.delegate)
         }
     }
 
-    private func recordByRequestId(_ event: TrafficEvent, requestId: UUID) {
-        switch event.kind {
-        case .start:
-            var acc = Accum(packetId: UUID().uuidString, url: event.url, start: Date(), response: nil, body: Data())
-            if let req = event.request {
-                acc.requestMethod = req.httpMethod ?? "GET"
-                acc.requestHeaders = req.allHTTPHeaderFields ?? [:]
-                if let body = req.httpBody {
-                    let limit = configuration.maxBodyBytes ?? body.count
-                    acc.requestBody = body.count <= limit ? body : Data(body.prefix(limit))
+    /// Builds a RequestPacket from current state. Must be called from inside queue.sync.
+    private func buildPacket(for url: URL, complete: Bool = false) -> RequestPacket? {
+        guard let acc = byURL[url] else { return nil }
+
+        var responseHeaders: [String: String]?
+        if let httpResponse = acc.response as? HTTPURLResponse {
+            responseHeaders = [:]
+            for (key, value) in httpResponse.allHeaderFields {
+                if let keyString = key as? String {
+                    if let valueString = value as? String {
+                        responseHeaders?[keyString] = valueString
+                    } else {
+                        responseHeaders?[keyString] = String(describing: value)
+                    }
                 }
             }
-            byRequestId[requestId] = acc
-            sendPacket(forRequestId: requestId)
-        case .response(let resp):
-            guard var acc = byRequestId[requestId] else { return }
-            acc.response = resp
-            byRequestId[requestId] = acc
-            sendPacket(forRequestId: requestId)
-        case .data(let d):
-            guard var acc = byRequestId[requestId] else { return }
-            acc.body.append(d)
-            byRequestId[requestId] = acc
-        case .finish:
-            sendPacket(forRequestId: requestId, complete: true)
-            byRequestId.removeValue(forKey: requestId)
         }
-    }
 
-    private func recordByURL(_ event: TrafficEvent) {
-        switch event.kind {
-        case .start:
-            var acc = Accum(packetId: UUID().uuidString, url: event.url, start: Date(), response: nil, body: Data())
-            if let req = event.request {
-                acc.requestMethod = req.httpMethod ?? "GET"
-                acc.requestHeaders = req.allHTTPHeaderFields ?? [:]
-                if let body = req.httpBody {
-                    let limit = configuration.maxBodyBytes ?? body.count
-                    acc.requestBody = body.count <= limit ? body : Data(body.prefix(limit))
-                }
-            }
-            byURL[event.url] = acc
-            sendPacket(for: event.url)
-        case .response(let resp):
-            guard var acc = byURL[event.url] else { return }
-            acc.response = resp
-            byURL[event.url] = acc
-            sendPacket(for: event.url)
-        case .data(let d):
-            guard var acc = byURL[event.url] else { return }
-            acc.body.append(d)
-            byURL[event.url] = acc
-        case .finish:
-            sendPacket(for: event.url, complete: true)
-            byURL.removeValue(forKey: event.url)
-        }
-    }
-
-    private func sendPacket(forRequestId requestId: UUID, complete: Bool = false) {
-        guard let acc = byRequestId[requestId] else { return }
-        sendPacket(acc: acc, complete: complete)
-    }
-
-    private func sendPacket(for url: URL, complete: Bool = false) {
-        guard let acc = byURL[url] else { return }
-        sendPacket(acc: acc, complete: complete)
-    }
-
-    private func sendPacket(acc: Accum, complete: Bool) {
         let info = RequestInfo(
-            url: acc.url,
+            url: url,
             requestHeaders: acc.requestHeaders,
             requestBody: acc.requestBody,
             requestMethod: acc.requestMethod,
-            responseHeaders: (acc.response as? HTTPURLResponse)?.allHeaderFields as? [String:String],
+            responseHeaders: responseHeaders,
             responseData: complete ? acc.body : nil,
             statusCode: (acc.response as? HTTPURLResponse).map { Int($0.statusCode) },
             startDate: acc.start,
             endDate: complete ? Date() : nil
         )
-        let packet = RequestPacket(packetId: acc.packetId, requestInfo: info, project: configuration.project, device: configuration.device)
+        return RequestPacket(packetId: acc.packetId, requestInfo: info, project: configuration.project, device: configuration.device)
+    }
 
+    /// Delegate callback runs outside any lock (re-entrant record() is safe). Network send + counters under lock.
+    private func dispatchPacket(_ packet: RequestPacket, delegate: TrafficInspectorDelegate?) {
         let hasDelegate = delegate != nil
         let delegateResult = delegate?.trafficInspector(self, willSend: packet)
 
-        if let modified = delegateResult {
-            client.sendPacket(modified)
-            packetsSent += 1
-        } else if hasDelegate {
-            packetsDropped += 1
-        } else {
-            client.sendPacket(packet)
-            packetsSent += 1
+        queue.sync {
+            if let modified = delegateResult {
+                client.sendPacket(modified)
+                packetsSent += 1
+            } else if hasDelegate {
+                packetsDropped += 1
+            } else {
+                client.sendPacket(packet)
+                packetsSent += 1
+            }
         }
     }
 }
 
 extension TrafficInspector: ServiceBrowserDelegate {
     public func serviceBrowser(_ browser: ServiceBrowser, didFindService service: NetService) {
-        client.setService(service)
+        queue.sync { client.setService(service) }
     }
     public func serviceBrowser(_ browser: ServiceBrowser, didRemoveService service: NetService) {}
     public func serviceBrowser(_ browser: ServiceBrowser, didFailWithError error: Error) {

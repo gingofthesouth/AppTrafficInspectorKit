@@ -21,7 +21,7 @@
 import Foundation
 
 public enum TrafficEventKind: Equatable {
-    case start
+    case start(requestMethod: String, requestHeaders: [String: String], requestBody: Data?)
     case response(URLResponse)
     case data(Data)
     case finish
@@ -47,7 +47,6 @@ public struct TrafficEvent: Equatable, @unchecked Sendable {
     }
 }
 
-@MainActor
 public protocol TrafficURLProtocolEventSink: AnyObject {
     func record(_ event: TrafficEvent)
 }
@@ -56,150 +55,157 @@ public final class TrafficURLProtocol: URLProtocol {
     nonisolated(unsafe) public static weak var eventSink: TrafficURLProtocolEventSink?
     nonisolated(unsafe) public static var maxBodyBytes: Int?
 
-    /// Forwarding session: lock-protected. Set by TrafficInspector when it creates its lazy session.
-    private static let forwardingSessionLock = NSLock()
-    nonisolated(unsafe) private static var _forwardingSession: URLSession?
+    /// No-op for API compatibility with TrafficInspector; this implementation uses internalSession for forwarding.
+    static func setForwardingSession(_ session: URLSession?) {}
 
-    static func setForwardingSession(_ session: URLSession?) {
-        forwardingSessionLock.lock()
-        _forwardingSession = session
-        forwardingSessionLock.unlock()
-    }
-
-    /// Returns the forwarding session. Lock-protected; URLSession is thread-safe once created.
-    private static func getForwardingSession() -> URLSession? {
-        forwardingSessionLock.lock()
-        let result = _forwardingSession
-        forwardingSessionLock.unlock()
-        return result
-    }
-
-    private static let activeForwardingLock = NSLock()
-    /// Protected by activeForwardingLock; nonisolated(unsafe) because access is always under the lock.
-    nonisolated(unsafe) private static var activeForwarding: [UUID: TrafficURLProtocol] = [:]
+    private static let handledRequestKey = "TrafficURLProtocolHandledRequest"
 
     private var receivedBytes: Int = 0
-    private var forwardingTask: URLSessionDataTask?
-    private var forwardingToken: UUID?
+    private var dataTask: URLSessionDataTask?
+    private var responseData = Data()
 
-    public override class func canInit(with request: URLRequest) -> Bool {
-        guard let scheme = request.url?.scheme else { return false }
-        switch scheme.lowercased() {
-        case "http", "https": return true
-        case "mock": return true // For testing
-        default: return false
+    // Internal session that does NOT include TrafficURLProtocol to prevent infinite loops
+    private static let internalSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        var protocols = config.protocolClasses ?? []
+        protocols.removeAll { $0 == TrafficURLProtocol.self }
+        config.protocolClasses = protocols
+        return URLSession(configuration: config)
+    }()
+
+    private static func readAllBytes(from stream: InputStream) -> Data {
+        stream.open()
+        defer { stream.close() }
+
+        var data = Data()
+        let bufferSize = 16 * 1024
+        var buffer = [UInt8](repeating: 0, count: bufferSize)
+        while stream.hasBytesAvailable {
+            let read = stream.read(&buffer, maxLength: bufferSize)
+            if read > 0 {
+                data.append(buffer, count: read)
+            } else {
+                break
+            }
         }
+        return data
     }
 
-    public override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    public override class func canInit(with request: URLRequest) -> Bool {
+        // Prevent infinite loops - don't handle requests we've already marked
+        if property(forKey: handledRequestKey, in: request) != nil {
+            return false
+        }
+        
+        // Handle http, https, and mock:// (for testing)
+        guard let scheme = request.url?.scheme?.lowercased() else { return false }
+        return scheme == "http" || scheme == "https" || scheme == "mock"
+    }
+    
+    public override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        return request
+    }
+    
+    public override class func requestIsCacheEquivalent(_ a: URLRequest, to b: URLRequest) -> Bool {
+        return super.requestIsCacheEquivalent(a, to: b)
+    }
 
     public override func startLoading() {
         guard let url = request.url else { return }
 
-        switch url.scheme?.lowercased() {
-        case "mock":
-            startLoadingMock(url: url)
-        case "http", "https":
-            startLoadingReal(url: url)
-        default:
-            client?.urlProtocol(self, didFailWithError: NSError(domain: NSURLErrorDomain, code: NSURLErrorUnsupportedURL, userInfo: nil))
+        // Capture request information
+        let method = request.httpMethod ?? "GET"
+        let headers = request.allHTTPHeaderFields ?? [:]
+        var body: Data? = request.httpBody
+        
+        // Handle mock:// scheme for testing (safe to read the stream; request won't be sent)
+        if url.scheme == "mock" {
+            if body == nil, let stream = request.httpBodyStream {
+                body = Self.readAllBytes(from: stream)
+            }
+            
+            // Record start event with request info
+            Self.eventSink?.record(TrafficEvent(url: url, kind: .start(requestMethod: method, requestHeaders: headers, requestBody: body)))
+            handleMockRequest(url: url)
+            return
         }
+        
+        // For real HTTP(S) requests, use internal session to avoid loops
+        guard let mutableRequest = (request as NSURLRequest).mutableCopy() as? NSMutableURLRequest else {
+            return
+        }
+        
+        // If the body was moved into a stream by URLSession, read+restore the stream on the mutable request.
+        if body == nil, let stream = mutableRequest.httpBodyStream {
+            let streamBody = Self.readAllBytes(from: stream)
+            body = streamBody
+            mutableRequest.httpBodyStream = InputStream(data: streamBody)
+            mutableRequest.httpBody = streamBody
+        }
+        
+        // Record start event with request info
+        Self.eventSink?.record(TrafficEvent(url: url, kind: .start(requestMethod: method, requestHeaders: headers, requestBody: body)))
+
+        URLProtocol.setProperty(true, forKey: Self.handledRequestKey, in: mutableRequest)
+        
+        dataTask = Self.internalSession.dataTask(with: mutableRequest as URLRequest) { [weak self] data, response, error in
+            guard let self = self else { return }
+            
+            if let error = error {
+                self.client?.urlProtocol(self, didFailWithError: error)
+                Self.eventSink?.record(TrafficEvent(url: url, kind: .finish))
+                return
+            }
+            
+            if let response = response {
+                self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                Self.eventSink?.record(TrafficEvent(url: url, kind: .response(response)))
+            }
+            
+            if let data = data {
+                let limit = Self.maxBodyBytes ?? data.count
+                let limitedData = data.prefix(limit)
+                self.responseData = data
+                self.receivedBytes += data.count
+                // Forward full response to the app; only record limited data for inspection.
+                if !data.isEmpty {
+                    self.client?.urlProtocol(self, didLoad: data)
+                }
+                if !limitedData.isEmpty {
+                    Self.eventSink?.record(TrafficEvent(url: url, kind: .data(Data(limitedData))))
+                }
+            }
+            
+            self.client?.urlProtocolDidFinishLoading(self)
+            Self.eventSink?.record(TrafficEvent(url: url, kind: .finish))
+        }
+        
+        dataTask?.resume()
     }
-
-    private func recordEvent(_ event: TrafficEvent) {
-        DispatchQueue.main.async { Self.eventSink?.record(event) }
-    }
-
-    private func startLoadingMock(url: URL) {
-        let requestId = UUID()
-        let requestToRecord = request
-        recordEvent(TrafficEvent(requestId: requestId, url: url, kind: .start, request: requestToRecord))
-
+    
+    private func handleMockRequest(url: URL) {
+        // Synthesize a response and small body for mock://
         let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type":"text/plain"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        recordEvent(TrafficEvent(requestId: requestId, url: url, kind: .response(response)))
+        Self.eventSink?.record(TrafficEvent(url: url, kind: .response(response)))
 
         let fullBody = Data([0x41, 0x42, 0x43, 0x44, 0x45])
         let limit = Self.maxBodyBytes ?? fullBody.count
-        let body = fullBody.prefix(limit)
-        receivedBytes += body.count
-        if !body.isEmpty {
-            client?.urlProtocol(self, didLoad: body)
-            recordEvent(TrafficEvent(requestId: requestId, url: url, kind: .data(Data(body))))
+        let limitedData = fullBody.prefix(limit)
+        receivedBytes += fullBody.count
+        if !fullBody.isEmpty {
+            client?.urlProtocol(self, didLoad: fullBody)
+        }
+        if !limitedData.isEmpty {
+            Self.eventSink?.record(TrafficEvent(url: url, kind: .data(Data(limitedData))))
         }
 
         client?.urlProtocolDidFinishLoading(self)
-        recordEvent(TrafficEvent(requestId: requestId, url: url, kind: .finish))
-    }
-
-    private func startLoadingReal(url: URL) {
-        let requestId = UUID()
-        guard let session = Self.getForwardingSession() else {
-            let message = "Forwarding session not available. Ensure TrafficInspector is created on the main thread so the forwarding session is set."
-            DevLogger.logError(message: message)
-            client?.urlProtocol(self, didFailWithError: NSError(domain: NSURLErrorDomain, code: NSURLErrorUnknown, userInfo: [NSLocalizedDescriptionKey: message]))
-            recordEvent(TrafficEvent(requestId: requestId, url: url, kind: .finish))
-            return
-        }
-
-        let requestToRecord = request
-        recordEvent(TrafficEvent(requestId: requestId, url: url, kind: .start, request: requestToRecord))
-
-        Self.activeForwardingLock.lock()
-        Self.activeForwarding[requestId] = self
-        Self.activeForwardingLock.unlock()
-        forwardingToken = requestId
-
-        let task = session.dataTask(with: request) { [requestId] data, response, error in
-            Self.activeForwardingLock.lock()
-            let proto = Self.activeForwarding.removeValue(forKey: requestId)
-            Self.activeForwardingLock.unlock()
-
-            guard let proto else { return }
-            if let error = error {
-                DevLogger.logError(error)
-                proto.client?.urlProtocol(proto, didFailWithError: error)
-                DispatchQueue.main.async {
-                    Self.eventSink?.record(TrafficEvent(requestId: requestId, url: url, kind: .finish))
-                }
-                return
-            }
-            if let response = response {
-                proto.client?.urlProtocol(proto, didReceive: response, cacheStoragePolicy: .notAllowed)
-                DispatchQueue.main.async {
-                    Self.eventSink?.record(TrafficEvent(requestId: requestId, url: url, kind: .response(response)))
-                }
-            }
-            if let data = data, !data.isEmpty {
-                let limit = Self.maxBodyBytes ?? Int.max
-                let toSend = data.prefix(limit)
-                proto.client?.urlProtocol(proto, didLoad: Data(toSend))
-                DispatchQueue.main.async {
-                    Self.eventSink?.record(TrafficEvent(requestId: requestId, url: url, kind: .data(Data(toSend))))
-                }
-            }
-            proto.client?.urlProtocolDidFinishLoading(proto)
-            DispatchQueue.main.async {
-                Self.eventSink?.record(TrafficEvent(requestId: requestId, url: url, kind: .finish))
-            }
-        }
-        forwardingTask = task
-        task.resume()
+        Self.eventSink?.record(TrafficEvent(url: url, kind: .finish))
     }
 
     public override func stopLoading() {
-        if let token = forwardingToken {
-            Self.activeForwardingLock.lock()
-            Self.activeForwarding.removeValue(forKey: token)
-            Self.activeForwardingLock.unlock()
-            forwardingToken = nil
-
-            // Record .finish so TrafficInspector removes the accumulator and avoids a leak.
-            if let url = request.url {
-                recordEvent(TrafficEvent(requestId: token, url: url, kind: .finish))
-            }
-        }
-        forwardingTask?.cancel()
-        forwardingTask = nil
+        dataTask?.cancel()
+        dataTask = nil
     }
 }
