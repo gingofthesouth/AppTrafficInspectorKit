@@ -73,6 +73,7 @@ extension ServiceBrowser: NetServiceBrowserDelegate {
 
     public func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String : NSNumber]) {
         let error = NSError(domain: "ServiceBrowser", code: -1, userInfo: errorDict)
+        DevLogger.logError(error)
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.delegate?.serviceBrowser(self, didFailWithError: error)

@@ -15,6 +15,7 @@ struct FiltersAndRedactorsTests {
         let conn = CollectingConnection()
         let scheduler = RecordingScheduler()
         let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: scheduler)
+        client.setService(NetService(domain: "local.", type: "_AppTraffic._tcp", name: "Test", port: 12345))
 
         // Use a custom inspector that applies redaction
         let inspector = TestableInspector(redaction: policy, client: client)
@@ -24,7 +25,7 @@ struct FiltersAndRedactorsTests {
         inspector.record(TrafficEvent(url: URL(string: "mock://h")!, kind: .response(resp)))
         inspector.record(TrafficEvent(url: URL(string: "mock://h")!, kind: .finish))
 
-        #expect(conn.frames.count >= 2)
+        #expect(conn.frames.count >= 1) // TestableInspector sends one packet on .response
         // Decode last packet
         if let frame = conn.frames.last {
             let payload = Data(frame.dropFirst(8))

@@ -21,10 +21,19 @@
 import Foundation
 
 public enum URLSessionConfigurationInjector {
-    @MainActor
-    public static func install() {
+    private static let installed: Void = {
         _ = swizzle(class: URLSessionConfiguration.self, original: #selector(getter: URLSessionConfiguration.default), replacement: #selector(URLSessionConfiguration.appTraffic_default))
         _ = swizzle(class: URLSessionConfiguration.self, original: #selector(getter: URLSessionConfiguration.ephemeral), replacement: #selector(URLSessionConfiguration.appTraffic_ephemeral))
+    }()
+
+    /// Call from app startup so swizzle runs before any URLSession (e.g. URLSession.shared) is created.
+    public static func runSwizzleIfNeeded() {
+        _ = installed
+    }
+
+    @MainActor
+    public static func install() {
+        runSwizzleIfNeeded()
     }
 
     private static func swizzle(class cls: AnyClass, original: Selector, replacement: Selector) -> Bool {

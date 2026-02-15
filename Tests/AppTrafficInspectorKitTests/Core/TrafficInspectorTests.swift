@@ -4,6 +4,7 @@ import Testing
 
 final class CollectingConnection: ConnectionType {
     var isReady: Bool = true
+    var onReady: (() -> Void)?
     var frames: [Data] = []
     func send(_ data: Data) { frames.append(data) }
 }
@@ -25,24 +26,116 @@ struct TrafficInspectorTests {
         let conn = CollectingConnection()
         let scheduler = RecordingScheduler()
         let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: scheduler)
+        client.setService(NetService(domain: "local.", type: "_AppTraffic._tcp", name: "Test", port: 12345))
         let inspector = TrafficInspector(configuration: Configuration(), client: client)
 
-        // Trigger a request via mock:// which our URLProtocol handles
-        let config = URLSessionConfiguration.ephemeral
-        URLSessionConfigurationInjector.install()
-        let session = URLSession(configuration: config)
-        let task = session.dataTask(with: URL(string: "mock://host/path")!)
-        task.resume()
+        // Simulate the event stream the URLProtocol would emit for a request (start → response → finish)
+        let url = URL(string: "https://example.com/path")!
+        inspector.record(TrafficEvent(url: url, kind: .start))
+        let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "text/plain"])!
+        inspector.record(TrafficEvent(url: url, kind: .response(response)))
+        inspector.record(TrafficEvent(url: url, kind: .finish))
 
-        wait(0.1)
-        #expect(conn.frames.count >= 2) // start + response at least
+        #expect(conn.frames.count == 3) // start + response + finish
+    }
+
+    @MainActor @Test
+    func allLifecyclePacketsShareSamePacketId() throws {
+        let conn = CollectingConnection()
+        let scheduler = RecordingScheduler()
+        let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: scheduler)
+        client.setService(NetService(domain: "local.", type: "_AppTraffic._tcp", name: "Test", port: 12345))
+        let inspector = TrafficInspector(configuration: Configuration(), client: client)
+
+        let url = URL(string: "https://example.com/path")!
+        inspector.record(TrafficEvent(url: url, kind: .start))
+        let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "text/plain"])!
+        inspector.record(TrafficEvent(url: url, kind: .response(response)))
+        inspector.record(TrafficEvent(url: url, kind: .data(Data("body".utf8))))
+        inspector.record(TrafficEvent(url: url, kind: .finish))
+
+        #expect(conn.frames.count == 3, "start, response, and finish each send one packet; .data does not")
+
+        let packets = try decodePackets(from: conn.frames)
+        #expect(packets.count == 3)
+
+        #expect(packets[0].packetId == packets[1].packetId)
+        #expect(packets[1].packetId == packets[2].packetId)
+        #expect(!packets[0].packetId.isEmpty)
+        #expect(UUID(uuidString: packets[0].packetId) != nil, "packetId must be a valid UUID string")
+    }
+
+    /// With requestId, two concurrent requests to the same URL are tracked separately (no overwrite in byURL).
+    @MainActor @Test
+    func concurrentSameURLRequestsTrackedSeparately() throws {
+        let conn = CollectingConnection()
+        let scheduler = RecordingScheduler()
+        let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: scheduler)
+        client.setService(NetService(domain: "local.", type: "_AppTraffic._tcp", name: "Test", port: 12345))
+        let inspector = TrafficInspector(configuration: Configuration(), client: client)
+
+        let url = URL(string: "https://example.com/same")!
+        let idA = UUID()
+        let idB = UUID()
+
+        // Request A: start
+        inspector.record(TrafficEvent(requestId: idA, url: url, kind: .start))
+        // Request B: start (same URL; would overwrite A if keyed only by URL)
+        inspector.record(TrafficEvent(requestId: idB, url: url, kind: .start))
+
+        let respA = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["X-Request": "A"])!
+        let respB = HTTPURLResponse(url: url, statusCode: 201, httpVersion: nil, headerFields: ["X-Request": "B"])!
+
+        inspector.record(TrafficEvent(requestId: idA, url: url, kind: .response(respA)))
+        inspector.record(TrafficEvent(requestId: idB, url: url, kind: .response(respB)))
+        inspector.record(TrafficEvent(requestId: idA, url: url, kind: .finish))
+        inspector.record(TrafficEvent(requestId: idB, url: url, kind: .finish))
+
+        #expect(conn.frames.count == 6)
+
+        let packets = try decodePackets(from: conn.frames)
+        #expect(packets.count == 6)
+        // Order: start A, start B, response A, response B, finish A, finish B
+        let packetIdA = packets[0].packetId
+        let packetIdB = packets[1].packetId
+        #expect(packetIdA != packetIdB)
+        #expect(packets[0].packetId == packets[2].packetId && packets[2].packetId == packets[4].packetId, "request A: same packetId for start, response, finish")
+        #expect(packets[1].packetId == packets[3].packetId && packets[3].packetId == packets[5].packetId, "request B: same packetId for start, response, finish")
+        #expect(packets[4].requestInfo.statusCode == 200, "request A finish has status 200")
+        #expect(packets[5].requestInfo.statusCode == 201, "request B finish has status 201")
     }
     
+    /// Simulates what happens when stopLoading() fires a .finish without a prior .response (cancelled request).
+    /// The accumulator must be removed so it does not leak.
+    @MainActor @Test
+    func cancelledRequestCleansUpAccumulator() throws {
+        let conn = CollectingConnection()
+        let scheduler = RecordingScheduler()
+        let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: scheduler)
+        client.setService(NetService(domain: "local.", type: "_AppTraffic._tcp", name: "Test", port: 12345))
+        let inspector = TrafficInspector(configuration: Configuration(), client: client)
+
+        let url = URL(string: "https://example.com/cancelled")!
+        let reqId = UUID()
+
+        // Start → immediate finish (no response), simulating a cancellation
+        inspector.record(TrafficEvent(requestId: reqId, url: url, kind: .start))
+        inspector.record(TrafficEvent(requestId: reqId, url: url, kind: .finish))
+
+        // start sends a packet, finish sends a packet → 2 total
+        #expect(conn.frames.count == 2)
+
+        // A duplicate .finish for the same requestId should be a no-op (accumulator already removed)
+        inspector.record(TrafficEvent(requestId: reqId, url: url, kind: .finish))
+        #expect(conn.frames.count == 2, "Duplicate .finish must not produce an extra packet")
+    }
+
     @MainActor @Test
     func delegateFilteringDropsPacketsAndIncrementsCounter() throws {
         let conn = CollectingConnection()
         let scheduler = RecordingScheduler()
         let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: scheduler)
+        client.setService(NetService(domain: "local.", type: "_AppTraffic._tcp", name: "Test", port: 12345))
         let inspector = TrafficInspector(configuration: Configuration(), client: client)
         
         let filteringDelegate = FilteringDelegate()
@@ -76,6 +169,7 @@ struct TrafficInspectorTests {
         let conn = CollectingConnection()
         let scheduler = RecordingScheduler()
         let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: scheduler)
+        client.setService(NetService(domain: "local.", type: "_AppTraffic._tcp", name: "Test", port: 12345))
         let inspector = TrafficInspector(configuration: Configuration(), client: client)
         
         let modifyingDelegate = FilteringDelegate()
@@ -105,6 +199,7 @@ struct TrafficInspectorTests {
         let conn = CollectingConnection()
         let scheduler = RecordingScheduler()
         let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: scheduler)
+        client.setService(NetService(domain: "local.", type: "_AppTraffic._tcp", name: "Test", port: 12345))
         let inspector = TrafficInspector(configuration: Configuration(), client: client)
         
         // No delegate set
@@ -128,5 +223,11 @@ struct TrafficInspectorTests {
 
 @MainActor
 private func wait(_ seconds: TimeInterval) {
-    RunLoop.current.run(until: Date().addingTimeInterval(seconds))
+    RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+}
+
+private func decodePackets(from frames: [Data]) throws -> [RequestPacket] {
+    let framer = PacketFramer()
+    return try frames.flatMap { framer.append($0) }
+        .map { try PacketJSON.decoder.decode(RequestPacket.self, from: $0) }
 }
