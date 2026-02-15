@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import XCTest
 @testable import AppTrafficInspectorKit
 
 final class RecordingSink: TrafficURLProtocolEventSink {
@@ -45,7 +46,7 @@ struct TrafficURLProtocolTests {
             if case .start = firstEventKind { return true } else { return false }
         }()
         #expect(isStartEvent)
-        #expect(events.contains(where: { 
+        #expect(events.contains(where: {
             if case .response = $0.kind { return true } else { return false }
         }))
         #expect(events.last?.kind == .finish)
@@ -70,9 +71,8 @@ struct TrafficURLProtocolTests {
             return events.contains { $0.kind == .finish } &&
                 events.contains { if case .data = $0.kind { return true } else { return false } }
         }
-        
-        let events = sink.snapshot()
 
+        let events = sink.snapshot()
         let datas = events.compactMap { event -> Data? in
             if case let .data(d) = event.kind { return d } else { return nil }
         }

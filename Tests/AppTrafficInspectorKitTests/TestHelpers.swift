@@ -3,6 +3,7 @@ import Foundation
 
 final class CollectingConnection: ConnectionType {
     var isReady: Bool = true
+    var onReady: (() -> Void)?
     var frames: [Data] = []
     func send(_ data: Data) { frames.append(data) }
 }

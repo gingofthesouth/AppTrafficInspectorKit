@@ -22,6 +22,9 @@ import Foundation
 
 public protocol ConnectionType {
     var isReady: Bool { get }
+    /// Called by the connection implementation when the connection transitions to ready.
+    /// `NetworkClient` sets this to flush buffered packets as soon as the connection is available.
+    var onReady: (() -> Void)? { get set }
     func send(_ data: Data)
 }
 
@@ -53,11 +56,23 @@ public final class NetworkClient {
             return
         }
         self.service = service
-        self.connection = connectionFactory(service)
+        var conn = connectionFactory(service)
+        conn.onReady = { [weak self] in
+            DevLogger.logError(message: "Connecting to service: \(service.hostName ?? "unknown host")")
+            DevLogger.logError(message: "Connection ready – flushing \(self?.buffer.count ?? 0) buffered frame(s)")
+            self?.flushIfReady()
+        }
+        self.connection = conn
     }
 
     public func sendPacket(_ packet: RequestPacket) {
-        guard let data = try? PacketJSON.encoder.encode(packet) else { return }
+        let data: Data
+        do {
+            data = try PacketJSON.encoder.encode(packet)
+        } catch {
+            DevLogger.logError(message: "Failed to encode packet \(packet.packetId): \(error)")
+            return
+        }
         let frame = PacketSerializer.makeFrame(payload: data)
         enqueue(frame)
         flushIfReady()

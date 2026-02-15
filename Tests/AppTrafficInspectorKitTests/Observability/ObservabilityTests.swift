@@ -25,7 +25,7 @@ struct ObservabilityTests {
         let session = URLSession(configuration: config)
         let task = session.dataTask(with: URL(string: "mock://host/path")!)
         task.resume()
-        
+
         waitUntil(1.0) { inspector.packetsSent > 0 }
         #expect(inspector.packetsSent > 0)
     }

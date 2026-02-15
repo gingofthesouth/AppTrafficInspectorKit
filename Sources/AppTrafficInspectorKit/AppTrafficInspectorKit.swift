@@ -51,6 +51,9 @@ public enum AppTrafficInspectorKit {
     ///
     /// - Parameter configuration: Custom configuration (defaults are used if not specified)
     public static func start(with configuration: Configuration) {
+#if DEBUG
+        DevLogger.logError(message: "Debug logging enabled")
+#endif
         // Install URLProtocol interception
         URLSessionConfigurationInjector.install()
         
@@ -59,6 +62,7 @@ public enum AppTrafficInspectorKit {
         if #available(iOS 12.0, macOS 10.14, *) {
             connectionFactory = { DefaultConnection(service: $0) }
         } else {
+            DevLogger.logError(message: "Network framework requires iOS 12.0+ or macOS 10.14+")
             fatalError("Network framework requires iOS 12.0+ or macOS 10.14+")
         }
         let scheduler = DefaultScheduler()

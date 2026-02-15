@@ -27,9 +27,24 @@ public enum TrafficEventKind: Equatable {
     case finish
 }
 
-public struct TrafficEvent: Equatable {
+public struct TrafficEvent: Equatable, @unchecked Sendable {
+    /// Unique id for this request lifecycle. When set, the inspector keys by this so concurrent requests to the same URL do not overwrite each other.
+    public let requestId: UUID?
     public let url: URL
     public let kind: TrafficEventKind
+    /// The underlying URLRequest, when available (e.g. for .start). Used to record method, headers, and body.
+    public let request: URLRequest?
+
+    public init(requestId: UUID? = nil, url: URL, kind: TrafficEventKind, request: URLRequest? = nil) {
+        self.requestId = requestId
+        self.url = url
+        self.kind = kind
+        self.request = request
+    }
+
+    public static func == (lhs: TrafficEvent, rhs: TrafficEvent) -> Bool {
+        lhs.requestId == rhs.requestId && lhs.url == rhs.url && lhs.kind == rhs.kind
+    }
 }
 
 public protocol TrafficURLProtocolEventSink: AnyObject {
@@ -39,13 +54,16 @@ public protocol TrafficURLProtocolEventSink: AnyObject {
 public final class TrafficURLProtocol: URLProtocol {
     nonisolated(unsafe) public static weak var eventSink: TrafficURLProtocolEventSink?
     nonisolated(unsafe) public static var maxBodyBytes: Int?
-    
+
+    /// No-op for API compatibility with TrafficInspector; this implementation uses internalSession for forwarding.
+    static func setForwardingSession(_ session: URLSession?) {}
+
     private static let handledRequestKey = "TrafficURLProtocolHandledRequest"
-    
+
     private var receivedBytes: Int = 0
     private var dataTask: URLSessionDataTask?
     private var responseData = Data()
-    
+
     // Internal session that does NOT include TrafficURLProtocol to prevent infinite loops
     private static let internalSession: URLSession = {
         let config = URLSessionConfiguration.default
@@ -54,11 +72,11 @@ public final class TrafficURLProtocol: URLProtocol {
         config.protocolClasses = protocols
         return URLSession(configuration: config)
     }()
-    
+
     private static func readAllBytes(from stream: InputStream) -> Data {
         stream.open()
         defer { stream.close() }
-        
+
         var data = Data()
         let bufferSize = 16 * 1024
         var buffer = [UInt8](repeating: 0, count: bufferSize)
@@ -94,7 +112,7 @@ public final class TrafficURLProtocol: URLProtocol {
 
     public override func startLoading() {
         guard let url = request.url else { return }
-        
+
         // Capture request information
         let method = request.httpMethod ?? "GET"
         let headers = request.allHTTPHeaderFields ?? [:]
@@ -171,7 +189,7 @@ public final class TrafficURLProtocol: URLProtocol {
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         Self.eventSink?.record(TrafficEvent(url: url, kind: .response(response)))
 
-        let fullBody = Data([0x41, 0x42, 0x43, 0x44, 0x45]) // ABCDE
+        let fullBody = Data([0x41, 0x42, 0x43, 0x44, 0x45])
         let limit = Self.maxBodyBytes ?? fullBody.count
         let limitedData = fullBody.prefix(limit)
         receivedBytes += fullBody.count

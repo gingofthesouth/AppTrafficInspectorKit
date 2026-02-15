@@ -24,6 +24,30 @@ struct TrafficInspectorTests {
         _ = inspector
     }
     
+    /// Simulates what happens when stopLoading() fires a .finish without a prior .response (cancelled request).
+    /// The accumulator must be removed so it does not leak.
+    @MainActor @Test
+    func cancelledRequestCleansUpAccumulator() throws {
+        let conn = CollectingConnection()
+        let scheduler = RecordingScheduler()
+        let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: scheduler)
+        client.setService(makeDummyService())
+        let inspector = TrafficInspector(configuration: Configuration(), client: client)
+
+        let url = URL(string: "https://example.com/cancelled")!
+
+        // Start → immediate finish (no response), simulating a cancellation
+        inspector.record(TrafficEvent(url: url, kind: .start(requestMethod: "GET", requestHeaders: [:], requestBody: nil)))
+        inspector.record(TrafficEvent(url: url, kind: .finish))
+
+        // start sends a packet, finish sends a packet → 2 total
+        #expect(conn.frames.count == 2)
+
+        // A duplicate .finish for the same URL should be a no-op (accumulator already removed)
+        inspector.record(TrafficEvent(url: url, kind: .finish))
+        #expect(conn.frames.count == 2, "Duplicate .finish must not produce an extra packet")
+    }
+
     @MainActor @Test
     func delegateFilteringDropsPacketsAndIncrementsCounter() throws {
         let conn = CollectingConnection()
@@ -31,7 +55,7 @@ struct TrafficInspectorTests {
         let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: scheduler)
         client.setService(makeDummyService())
         let inspector = TrafficInspector(configuration: Configuration(), client: client)
-        
+
         let filteringDelegate = FilteringDelegate()
         filteringDelegate.shouldFilter = true
         inspector.delegate = filteringDelegate
@@ -65,7 +89,7 @@ struct TrafficInspectorTests {
         let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: scheduler)
         client.setService(makeDummyService())
         let inspector = TrafficInspector(configuration: Configuration(), client: client)
-        
+
         let modifyingDelegate = FilteringDelegate()
         modifyingDelegate.shouldFilter = false // Don't filter, just pass through
         inspector.delegate = modifyingDelegate
@@ -113,7 +137,7 @@ struct TrafficInspectorTests {
         let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: scheduler)
         client.setService(makeDummyService())
         let inspector = TrafficInspector(configuration: Configuration(), client: client)
-        
+
         // No delegate set
         #expect(inspector.delegate == nil)
         

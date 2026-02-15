@@ -5,6 +5,7 @@ import Testing
 final class FakeConnection: ConnectionType {
     var sent: [Data] = []
     var isReady: Bool = true
+    var onReady: (() -> Void)?
     var onFail: (() -> Void)?
 
     func send(_ data: Data) {
@@ -70,54 +71,54 @@ struct NetworkClientTests {
         client.flushIfReady()
         #expect(conn.sent.count == 2)
     }
-    
+
     @Test
     func encodingFailure_handlesGracefully() throws {
         let conn = FakeConnection()
         let scheduler = RecordingScheduler()
         let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: scheduler)
-        
+
         client.setService(NetService(domain: "local.", type: "_AppTraffic._tcp", name: "Mac", port: 43435))
-        
+
         // Create a packet that would cause encoding issues
         // Since RequestPacket is Codable, we can't easily create an unencodable packet
         // But we can test that encoding failures don't crash
         let validPacket = samplePacket()
         client.sendPacket(validPacket)
-        
+
         // Should not crash, packet should be sent if encoding succeeds
         #expect(conn.sent.count >= 0) // At least doesn't crash
     }
-    
+
     @Test
     func bufferCapacity_limitsBufferSize() throws {
         let conn = FakeConnection()
         conn.isReady = false
         let scheduler = RecordingScheduler()
         let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: scheduler, bufferCapacity: 3)
-        
+
         client.setService(NetService(domain: "local.", type: "_AppTraffic._tcp", name: "Mac", port: 43435))
-        
+
         // Send more packets than capacity
         for _ in 0..<5 {
             client.sendPacket(samplePacket())
         }
-        
+
         // Buffer should be limited to capacity
         conn.isReady = true
         client.flushIfReady()
         #expect(conn.sent.count == 3) // Only last 3 should remain
     }
-    
+
     @Test
     func multiplePackets_bufferedCorrectly() throws {
         let conn = FakeConnection()
         conn.isReady = false
         let scheduler = RecordingScheduler()
         let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: scheduler, bufferCapacity: 10)
-        
+
         client.setService(NetService(domain: "local.", type: "_AppTraffic._tcp", name: "Mac", port: 43435))
-        
+
         // Send multiple packets
         for i in 0..<5 {
             let packet = RequestPacket(
@@ -138,29 +139,29 @@ struct NetworkClientTests {
             )
             client.sendPacket(packet)
         }
-        
+
         #expect(conn.sent.isEmpty)
         conn.isReady = true
         client.flushIfReady()
         #expect(conn.sent.count == 5)
     }
-    
+
     @Test
     func connectionStateTransition_flushesWhenReady() throws {
         let conn = FakeConnection()
         conn.isReady = false
         let scheduler = RecordingScheduler()
         let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: scheduler)
-        
+
         client.setService(NetService(domain: "local.", type: "_AppTraffic._tcp", name: "Mac", port: 43435))
         client.sendPacket(samplePacket())
-        
+
         #expect(conn.sent.isEmpty)
-        
+
         // Transition to ready
         conn.isReady = true
         client.flushIfReady()
-        
+
         #expect(conn.sent.count == 1)
     }
 }

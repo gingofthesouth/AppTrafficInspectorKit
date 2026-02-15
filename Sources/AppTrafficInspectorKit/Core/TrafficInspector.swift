@@ -46,6 +46,15 @@ public final class TrafficInspector {
     public private(set) var packetsSent: Int = 0
     public private(set) var packetsDropped: Int = 0
 
+    /// Session for forwarding real HTTP/HTTPS. Created on main at init so the protocol never touches URLSession on the CFNetwork queue.
+    private lazy var forwardingSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = []
+        let session = URLSession(configuration: config)
+        TrafficURLProtocol.setForwardingSession(session)
+        return session
+    }()
+
     public init(configuration: Configuration, client: NetworkClient) {
         self.configuration = configuration
         self.client = client
@@ -54,6 +63,7 @@ public final class TrafficInspector {
         self.browser.startBrowsing()
         TrafficURLProtocol.eventSink = self
         TrafficURLProtocol.maxBodyBytes = configuration.maxBodyBytes
+        _ = forwardingSession
     }
 
 }
@@ -159,5 +169,7 @@ extension TrafficInspector: ServiceBrowserDelegate {
         queue.sync { client.setService(service) }
     }
     public func serviceBrowser(_ browser: ServiceBrowser, didRemoveService service: NetService) {}
-    public func serviceBrowser(_ browser: ServiceBrowser, didFailWithError error: Error) {}
+    public func serviceBrowser(_ browser: ServiceBrowser, didFailWithError error: Error) {
+        DevLogger.logError(error)
+    }
 }
