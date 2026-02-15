@@ -33,6 +33,7 @@ public final class TrafficInspector {
     private let queue = DispatchQueue(label: "com.apptrafficinspector.trafficInspector")
 
     private struct Accum {
+        let packetId: String
         var start: Date
         var requestMethod: String
         var requestHeaders: [String: String]
@@ -64,6 +65,7 @@ extension TrafficInspector: TrafficURLProtocolEventSink {
             switch event.kind {
             case .start(let method, let headers, let body):
                 byURL[event.url] = Accum(
+                    packetId: UUID().uuidString,
                     start: Date(),
                     requestMethod: method,
                     requestHeaders: headers,
@@ -130,7 +132,7 @@ extension TrafficInspector: TrafficURLProtocolEventSink {
             startDate: acc.start,
             endDate: complete ? Date() : nil
         )
-        return RequestPacket(packetId: UUID().uuidString, requestInfo: info, project: configuration.project, device: configuration.device)
+        return RequestPacket(packetId: acc.packetId, requestInfo: info, project: configuration.project, device: configuration.device)
     }
 
     /// Delegate callback runs outside any lock (re-entrant record() is safe). Network send + counters under lock.

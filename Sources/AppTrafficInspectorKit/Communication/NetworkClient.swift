@@ -45,7 +45,13 @@ public final class NetworkClient {
         self.bufferCapacity = bufferCapacity
     }
 
+    /// Uses a single connection per logical service (name+type+domain) so Bonjour reporting the same service
+    /// multiple times does not open duplicate connections.
     public func setService(_ service: NetService) {
+        let key = "\(service.name).\(service.type).\(service.domain)"
+        if let existing = self.service, "\(existing.name).\(existing.type).\(existing.domain)" == key {
+            return
+        }
         self.service = service
         self.connection = connectionFactory(service)
     }
