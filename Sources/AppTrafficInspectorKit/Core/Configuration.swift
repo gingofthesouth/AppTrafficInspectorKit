@@ -20,6 +20,10 @@
 
 import Foundation
 
+#if canImport(Network)
+import Network
+#endif
+
 public struct Configuration {
     public var netServiceType: String
     public var netServiceDomain: String
