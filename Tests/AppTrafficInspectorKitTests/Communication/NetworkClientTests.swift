@@ -164,4 +164,86 @@ struct NetworkClientTests {
 
         #expect(conn.sent.count == 1)
     }
+
+    /// After clearService(), calling setService() with the same name creates a fresh connection
+    /// (the deduplication guard no longer blocks it). This is the reconnect scenario that fires
+    /// when the receiver app quits and relaunches.
+    @Test
+    func clearService_allowsReconnectToSameServiceName() throws {
+        var factoryCallCount = 0
+        let conn1 = FakeConnection()
+        let conn2 = FakeConnection()
+        let connections = [conn1, conn2]
+        let scheduler = RecordingScheduler()
+
+        let client = NetworkClient(
+            connectionFactory: { _ in
+                let c = connections[min(factoryCallCount, connections.count - 1)]
+                factoryCallCount += 1
+                return c
+            },
+            scheduler: scheduler
+        )
+
+        let service = NetService(domain: "local.", type: "_AppTraffic._tcp", name: "Mac", port: 43435)
+
+        // First connection
+        client.setService(service)
+        #expect(factoryCallCount == 1)
+
+        // Setting the same service without clearing is a no-op (deduplication guard)
+        client.setService(service)
+        #expect(factoryCallCount == 1, "Duplicate setService must not create a second connection")
+
+        // Clear (simulates receiver quitting)
+        client.clearService()
+
+        // Setting the same service again must now create a fresh connection
+        client.setService(service)
+        #expect(factoryCallCount == 2, "After clearService, the same service name must create a new connection")
+
+        // The new connection should receive sent packets
+        client.sendPacket(samplePacket())
+        #expect(conn1.sent.isEmpty, "Old connection must not receive packets after reconnect")
+        #expect(conn2.sent.count == 1, "New connection must receive the packet")
+    }
+
+    /// Packets buffered while disconnected are flushed when the replacement connection becomes ready.
+    @Test
+    func clearService_bufferedPackets_flushedOnReconnect() throws {
+        let conn1 = FakeConnection()
+        conn1.isReady = true
+        var secondConn: FakeConnection?
+        var factoryCallCount = 0
+
+        let scheduler = RecordingScheduler()
+        let client = NetworkClient(
+            connectionFactory: { _ in
+                factoryCallCount += 1
+                if factoryCallCount == 1 { return conn1 }
+                let c = FakeConnection()
+                c.isReady = false
+                secondConn = c
+                return c
+            },
+            scheduler: scheduler
+        )
+
+        let service = NetService(domain: "local.", type: "_AppTraffic._tcp", name: "Mac", port: 43435)
+        client.setService(service)
+
+        // Receiver quits → clear → buffer a packet while disconnected
+        client.clearService()
+        client.sendPacket(samplePacket())   // goes into buffer (no connection)
+
+        // Receiver relaunches → new connection arrives
+        client.setService(service)
+        let conn2 = try #require(secondConn)
+        #expect(conn2.sent.isEmpty, "Not flushed yet – connection not ready")
+
+        // Connection becomes ready → onReady fires → buffer drains
+        conn2.isReady = true
+        conn2.onReady?()
+        #expect(conn2.sent.count == 1, "Buffered packet must be flushed once the new connection is ready")
+    }
 }

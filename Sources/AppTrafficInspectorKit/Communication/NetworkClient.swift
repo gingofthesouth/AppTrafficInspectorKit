@@ -93,4 +93,13 @@ public final class NetworkClient {
             conn.send(frame)
         }
     }
+
+    /// Drops the current service and connection so that the next `setService` call — even for the
+    /// same logical service — creates a fresh connection. Call this when the remote service
+    /// disappears (e.g. the receiver app quits) so the kit reconnects automatically when the
+    /// receiver relaunches.
+    public func clearService() {
+        service = nil
+        connection = nil
+    }
 }

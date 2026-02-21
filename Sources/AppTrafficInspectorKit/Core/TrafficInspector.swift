@@ -168,7 +168,11 @@ extension TrafficInspector: ServiceBrowserDelegate {
     public func serviceBrowser(_ browser: ServiceBrowser, didFindService service: NetService) {
         queue.sync { client.setService(service) }
     }
-    public func serviceBrowser(_ browser: ServiceBrowser, didRemoveService service: NetService) {}
+    public func serviceBrowser(_ browser: ServiceBrowser, didRemoveService service: NetService) {
+        // Clear the stale service and connection so the next didFindService (when the receiver
+        // relaunches) creates a fresh connection, even if the service name hasn't changed.
+        queue.sync { client.clearService() }
+    }
     public func serviceBrowser(_ browser: ServiceBrowser, didFailWithError error: Error) {
         DevLogger.logError(error)
     }

@@ -19,10 +19,18 @@
 //
 
 import Foundation
-
-#if canImport(Network)
 import Network
+#if os(iOS) || os(tvOS) || os(visionOS)
+import UIKit
 #endif
+
+public var deviceDisplayName: String {
+    #if os(iOS) || os(tvOS) || os(visionOS)
+    return UIDevice.current.name  // e.g. "Ernest's iPhone"
+    #else
+    return Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+    #endif
+}
 
 public struct Configuration {
     public var netServiceType: String
@@ -35,7 +43,7 @@ public struct Configuration {
         netServiceType: String = "_AppTraffic._tcp",
         netServiceDomain: String = "",
         project: ProjectInfo = ProjectInfo(projectName: Bundle.main.infoDictionary?["CFBundleName"] as? String ?? "App"),
-        device: DeviceInfo = DeviceInfo(deviceId: UUID().uuidString, deviceName: Host.current().localizedName ?? "Device", deviceDescription: ProcessInfo.processInfo.operatingSystemVersionString),
+        device: DeviceInfo = DeviceInfo(deviceId: UUID().uuidString, deviceName: deviceDisplayName, deviceDescription: ProcessInfo.processInfo.operatingSystemVersionString),
         maxBodyBytes: Int? = nil
     ) {
         self.netServiceType = netServiceType
