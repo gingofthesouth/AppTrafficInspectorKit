@@ -177,6 +177,149 @@ struct TrafficURLProtocolTests {
     }
 }
 
+// MARK: - ChallengeHandler tests
+
+@Suite("ChallengeHandler", .serialized)
+struct ChallengeHandlerTests {
+
+    init() {
+        // Reset shared state before each test.
+        TrafficURLProtocol.challengeHandler = nil
+    }
+
+    @Test
+    func challengeHandler_isNilByDefault() {
+        TrafficURLProtocol.challengeHandler = nil // ensure clean slate
+        #expect(TrafficURLProtocol.challengeHandler == nil)
+    }
+
+    @Test
+    func challengeHandler_canBeSetAndCleared() {
+        TrafficURLProtocol.challengeHandler = { _, completion in completion(.performDefaultHandling, nil) }
+        #expect(TrafficURLProtocol.challengeHandler != nil)
+        TrafficURLProtocol.challengeHandler = nil
+        #expect(TrafficURLProtocol.challengeHandler == nil)
+    }
+
+    @Test
+    func challengeHandler_isInvokedWithChallenge() {
+        var capturedMethod: String?
+        TrafficURLProtocol.challengeHandler = { challenge, completion in
+            capturedMethod = challenge.protectionSpace.authenticationMethod
+            completion(.performDefaultHandling, nil)
+        }
+        defer { TrafficURLProtocol.challengeHandler = nil }
+
+        let challenge = makeChallenge(method: NSURLAuthenticationMethodClientCertificate)
+        TrafficURLProtocol.challengeHandler?(challenge) { _, _ in }
+
+        #expect(capturedMethod == NSURLAuthenticationMethodClientCertificate)
+    }
+
+    @Test
+    func challengeHandler_clientCertificate_canPresentCredential() {
+        let credential = URLCredential(user: "test", password: "pass", persistence: .none)
+        TrafficURLProtocol.challengeHandler = { challenge, completion in
+            if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodClientCertificate {
+                completion(.useCredential, credential)
+            } else {
+                completion(.performDefaultHandling, nil)
+            }
+        }
+        defer { TrafficURLProtocol.challengeHandler = nil }
+
+        var disposition: URLSession.AuthChallengeDisposition?
+        var returnedCredential: URLCredential?
+        let challenge = makeChallenge(method: NSURLAuthenticationMethodClientCertificate)
+        TrafficURLProtocol.challengeHandler?(challenge) { d, c in
+            disposition = d
+            returnedCredential = c
+        }
+
+        #expect(disposition == .useCredential)
+        #expect(returnedCredential === credential)
+    }
+
+    @Test
+    func challengeHandler_serverTrust_passesMethodThrough() {
+        var capturedMethod: String?
+        TrafficURLProtocol.challengeHandler = { challenge, completion in
+            capturedMethod = challenge.protectionSpace.authenticationMethod
+            completion(.performDefaultHandling, nil)
+        }
+        defer { TrafficURLProtocol.challengeHandler = nil }
+
+        let challenge = makeChallenge(method: NSURLAuthenticationMethodServerTrust)
+        TrafficURLProtocol.challengeHandler?(challenge) { _, _ in }
+
+        #expect(capturedMethod == NSURLAuthenticationMethodServerTrust)
+    }
+
+    @Test
+    func challengeHandler_delegatesToExistingLogic() {
+        // Mirrors the real app wiring: a shared delegate handles the challenge.
+        let delegate = StubChallengeDelegate()
+        TrafficURLProtocol.challengeHandler = { challenge, completion in
+            delegate.urlSession(URLSession.shared, didReceive: challenge, completionHandler: completion)
+        }
+        defer { TrafficURLProtocol.challengeHandler = nil }
+
+        let challenge = makeChallenge(method: NSURLAuthenticationMethodClientCertificate)
+        var disposition: URLSession.AuthChallengeDisposition?
+        TrafficURLProtocol.challengeHandler?(challenge) { d, _ in disposition = d }
+
+        // StubChallengeDelegate rejects client cert challenges when no credential is loaded.
+        #expect(disposition == .rejectProtectionSpace)
+    }
+
+    @Test
+    func challengeHandler_nilHandler_completionHandlerNotCalled() {
+        // When nil, InternalSessionDelegate falls back to performDefaultHandling.
+        // Verify that a nil handler is safe to call via optional chaining (no crash).
+        TrafficURLProtocol.challengeHandler = nil
+        var called = false
+        TrafficURLProtocol.challengeHandler?(makeChallenge(method: NSURLAuthenticationMethodClientCertificate)) { _, _ in called = true }
+        #expect(!called)
+    }
+}
+
+// MARK: - Test helpers
+
+private final class MockChallengeSender: NSObject, URLAuthenticationChallengeSender {
+    func use(_ credential: URLCredential, for challenge: URLAuthenticationChallenge) {}
+    func continueWithoutCredential(for challenge: URLAuthenticationChallenge) {}
+    func cancel(_ challenge: URLAuthenticationChallenge) {}
+    func performDefaultHandling(for challenge: URLAuthenticationChallenge) {}
+    func rejectProtectionSpaceAndContinue(with challenge: URLAuthenticationChallenge) {}
+}
+
+/// Mirrors the shape of the app's RestClientSessionDelegate for use in tests.
+private final class StubChallengeDelegate: NSObject, URLSessionDelegate {
+    var credential: URLCredential?
+
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        switch challenge.protectionSpace.authenticationMethod {
+        case NSURLAuthenticationMethodClientCertificate:
+            if let credential {
+                completionHandler(.useCredential, credential)
+            } else {
+                completionHandler(.rejectProtectionSpace, nil)
+            }
+        default:
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+}
+
+private func makeChallenge(method: String) -> URLAuthenticationChallenge {
+    let space = URLProtectionSpace(host: "example.com", port: 443, protocol: "https",
+                                   realm: nil, authenticationMethod: method)
+    return URLAuthenticationChallenge(protectionSpace: space, proposedCredential: nil,
+                                      previousFailureCount: 0, failureResponse: nil,
+                                      error: nil, sender: MockChallengeSender())
+}
+
 private func waitUntil(_ timeout: TimeInterval, predicate: @escaping () -> Bool) {
     let start = Date()
     while Date().timeIntervalSince(start) < timeout {

@@ -26,7 +26,7 @@ import UIKit
 
 public var deviceDisplayName: String {
     #if os(iOS) || os(tvOS) || os(visionOS)
-    return UIDevice.current.name  // e.g. "Ernest's iPhone"
+    return MainActor.assumeIsolated { UIDevice.current.name }
     #else
     return Host.current().localizedName ?? ProcessInfo.processInfo.hostName
     #endif
