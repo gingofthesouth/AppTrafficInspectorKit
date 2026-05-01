@@ -295,7 +295,12 @@ private final class MockChallengeSender: NSObject, URLAuthenticationChallengeSen
 
 /// Mirrors the shape of the app's RestClientSessionDelegate for use in tests.
 private final class StubChallengeDelegate: NSObject, URLSessionDelegate {
-    var credential: URLCredential?
+    let credential: URLCredential?
+    
+    init(credential: URLCredential? = nil) {
+        self.credential = credential
+        super.init()
+    }
 
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {

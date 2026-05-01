@@ -4,7 +4,7 @@ Swift package to capture app HTTP(S) traffic during development and stream it to
 
 ## Requirements
 
-- iOS 12.0+ / macOS 10.15+
+- iOS 13.0+ / macOS 10.15+ / tvOS 13.0+ / watchOS 6.0+
 - Swift 5.9+
 - Xcode 15.0+
 
@@ -133,6 +133,46 @@ let config = Configuration(
     maxBodyBytes: 64 * 1024  // Optional: limit body size
 )
 ```
+
+### Mutual TLS (mTLS)
+
+If your app communicates with a server that requires a client certificate, you need to supply a challenge handler to the library. Because the library re-issues intercepted requests through its own internal `URLSession`, authentication challenges from the server arrive at that session rather than at your app's `URLSessionDelegate`. Without a handler, the TLS handshake fails.
+
+Set `TrafficURLProtocol.challengeHandler` before calling `start()`:
+
+```swift
+#if DEBUG
+TrafficURLProtocol.challengeHandler = { challenge, completionHandler in
+    switch challenge.protectionSpace.authenticationMethod {
+    case NSURLAuthenticationMethodClientCertificate:
+        // Load your identity and respond with a credential.
+        let credential = URLCredential(
+            identity: yourIdentity,
+            certificates: yourCertificateChain,
+            persistence: .forSession
+        )
+        completionHandler(.useCredential, credential)
+    default:
+        completionHandler(.performDefaultHandling, nil)
+    }
+}
+AppTrafficInspectorKit.start()
+#endif
+```
+
+The closure signature matches `URLSessionDelegate.urlSession(_:didReceive:completionHandler:)`, so you can forward the challenge directly to any existing delegate rather than duplicating logic:
+
+```swift
+TrafficURLProtocol.challengeHandler = { challenge, completionHandler in
+    mySessionDelegate.urlSession(
+        URLSession.shared,
+        didReceive: challenge,
+        completionHandler: completionHandler
+    )
+}
+```
+
+If `challengeHandler` is `nil` (the default), all challenges fall back to `.performDefaultHandling`, which is appropriate for servers that do not require client certificates.
 
 ### Privacy and Redaction
 
