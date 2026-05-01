@@ -21,7 +21,6 @@
 import Foundation
 import Network
 
-@available(iOS 12.0, macOS 10.14, *)
 final class DefaultConnection: ConnectionType, @unchecked Sendable {
     private let connection: NWConnection
     private var isReadyValue = false

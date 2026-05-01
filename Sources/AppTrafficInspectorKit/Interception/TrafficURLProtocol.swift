@@ -34,14 +34,14 @@ public struct TrafficEvent: Equatable, @unchecked Sendable {
     public let kind: TrafficEventKind
     /// The underlying URLRequest, when available (e.g. for .start). Used to record method, headers, and body.
     public let request: URLRequest?
-
+    
     public init(requestId: UUID? = nil, url: URL, kind: TrafficEventKind, request: URLRequest? = nil) {
         self.requestId = requestId
         self.url = url
         self.kind = kind
         self.request = request
     }
-
+    
     public static func == (lhs: TrafficEvent, rhs: TrafficEvent) -> Bool {
         lhs.requestId == rhs.requestId && lhs.url == rhs.url && lhs.kind == rhs.kind
     }
@@ -51,32 +51,52 @@ public protocol TrafficURLProtocolEventSink: AnyObject {
     func record(_ event: TrafficEvent)
 }
 
-public final class TrafficURLProtocol: URLProtocol {
+private final class InternalSessionDelegate: NSObject, URLSessionDelegate {
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if let handler = TrafficURLProtocol.challengeHandler {
+            handler(challenge, completionHandler)
+        } else {
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+}
+
+public final class TrafficURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) public static weak var eventSink: TrafficURLProtocolEventSink?
     nonisolated(unsafe) public static var maxBodyBytes: Int?
-
+    
+    /// Set before calling `AppTrafficInspectorKit.start()` to handle authentication challenges
+    /// (mTLS, server trust, etc.) that arise on the library's internal forwarding session.
+    /// The closure receives the same challenge and completionHandler as `URLSessionDelegate`'s
+    /// `urlSession(_:didReceive:completionHandler:)` — forward directly to your existing delegate.
+    nonisolated(unsafe) public static var challengeHandler: ((URLAuthenticationChallenge, @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) -> Void)?
+    
     /// No-op for API compatibility with TrafficInspector; this implementation uses internalSession for forwarding.
     static func setForwardingSession(_ session: URLSession?) {}
-
+    
     private static let handledRequestKey = "TrafficURLProtocolHandledRequest"
-
+    
     private var receivedBytes: Int = 0
     private var dataTask: URLSessionDataTask?
     private var responseData = Data()
-
-    // Internal session that does NOT include TrafficURLProtocol to prevent infinite loops
+    
+    // Held strongly because URLSession only keeps a weak reference to its delegate.
+    private static let internalSessionDelegate = InternalSessionDelegate()
+    
+    // Internal session that does NOT include TrafficURLProtocol to prevent infinite loops.
     private static let internalSession: URLSession = {
         let config = URLSessionConfiguration.default
         var protocols = config.protocolClasses ?? []
         protocols.removeAll { $0 == TrafficURLProtocol.self }
         config.protocolClasses = protocols
-        return URLSession(configuration: config)
+        return URLSession(configuration: config, delegate: internalSessionDelegate, delegateQueue: nil)
     }()
-
+    
     private static func readAllBytes(from stream: InputStream) -> Data {
         stream.open()
         defer { stream.close() }
-
+        
         var data = Data()
         let bufferSize = 16 * 1024
         var buffer = [UInt8](repeating: 0, count: bufferSize)
@@ -90,7 +110,7 @@ public final class TrafficURLProtocol: URLProtocol {
         }
         return data
     }
-
+    
     public override class func canInit(with request: URLRequest) -> Bool {
         // Prevent infinite loops - don't handle requests we've already marked
         if property(forKey: handledRequestKey, in: request) != nil {
@@ -109,10 +129,10 @@ public final class TrafficURLProtocol: URLProtocol {
     public override class func requestIsCacheEquivalent(_ a: URLRequest, to b: URLRequest) -> Bool {
         return super.requestIsCacheEquivalent(a, to: b)
     }
-
+    
     public override func startLoading() {
         guard let url = request.url else { return }
-
+        
         // Capture request information
         let method = request.httpMethod ?? "GET"
         let headers = request.allHTTPHeaderFields ?? [:]
@@ -145,7 +165,7 @@ public final class TrafficURLProtocol: URLProtocol {
         
         // Record start event with request info
         Self.eventSink?.record(TrafficEvent(url: url, kind: .start(requestMethod: method, requestHeaders: headers, requestBody: body)))
-
+        
         URLProtocol.setProperty(true, forKey: Self.handledRequestKey, in: mutableRequest)
         
         dataTask = Self.internalSession.dataTask(with: mutableRequest as URLRequest) { [weak self] data, response, error in
@@ -188,7 +208,7 @@ public final class TrafficURLProtocol: URLProtocol {
         let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type":"text/plain"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         Self.eventSink?.record(TrafficEvent(url: url, kind: .response(response)))
-
+        
         let fullBody = Data([0x41, 0x42, 0x43, 0x44, 0x45])
         let limit = Self.maxBodyBytes ?? fullBody.count
         let limitedData = fullBody.prefix(limit)
@@ -199,11 +219,11 @@ public final class TrafficURLProtocol: URLProtocol {
         if !limitedData.isEmpty {
             Self.eventSink?.record(TrafficEvent(url: url, kind: .data(Data(limitedData))))
         }
-
+        
         client?.urlProtocolDidFinishLoading(self)
         Self.eventSink?.record(TrafficEvent(url: url, kind: .finish))
     }
-
+    
     public override func stopLoading() {
         dataTask?.cancel()
         dataTask = nil

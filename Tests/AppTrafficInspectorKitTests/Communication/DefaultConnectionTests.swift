@@ -5,7 +5,6 @@ import Network
 
 @Suite("DefaultConnection")
 struct DefaultConnectionTests {
-    @available(iOS 12.0, macOS 10.14, *)
     @Test
     func isReady_transitionsFromFalseToTrue() async throws {
         let service = NetService(domain: "local.", type: "_AppTraffic._tcp", name: "TestService", port: 43435)
@@ -27,7 +26,6 @@ struct DefaultConnectionTests {
         #expect(laterReady == false || laterReady == true)
     }
     
-    @available(iOS 12.0, macOS 10.14, *)
     @Test
     func send_dataWhenReady() async throws {
         let service = NetService(domain: "local.", type: "_AppTraffic._tcp", name: "TestService", port: 43435)
