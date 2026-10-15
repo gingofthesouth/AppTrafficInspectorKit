@@ -64,7 +64,7 @@ For custom configuration:
 
 ```swift
 #if DEBUG
-let config = Configuration(maxBodyBytes: 64 * 1024)
+let config = Configuration(maxBodyBytes: 4 * 1024 * 1024) // capture up to 4 MiB per body
 AppTrafficInspectorKit.start(with: config)
 #endif
 ```
@@ -109,7 +109,7 @@ final class CustomScheduler: SchedulerType {
 
 // 3. Create and start inspector
 @MainActor
-let config = Configuration(maxBodyBytes: 64 * 1024)
+let config = Configuration()
 let connFactory: (NetService) -> ConnectionType = { CustomConnection(service: $0) }
 let scheduler = CustomScheduler()
 let client = NetworkClient(connectionFactory: connFactory, scheduler: scheduler)
@@ -130,9 +130,29 @@ let config = Configuration(
         deviceName: Host.current().localizedName ?? "Device",
         deviceDescription: ProcessInfo.processInfo.operatingSystemVersionString
     ),
-    maxBodyBytes: 64 * 1024  // Optional: limit body size
+    maxBodyBytes: Configuration.defaultMaxBodyBytes  // Default 8 MiB per body; nil = unlimited
 )
 ```
+
+### Body size limits
+
+`maxBodyBytes` caps how much of each request body and each response body is sent to the Mac app. It defaults to `Configuration.defaultMaxBodyBytes` (8 MiB). Bodies are base64-encoded on the wire, so two 8 MiB bodies come to about 21.3 MiB, which fits within the Mac app's 25 MiB per-transaction limit. Pass `nil` for no limit. The cap only affects what is captured. Your app always sends and receives the full body.
+
+When the Kit truncates a body, the packet says so. Images and other media are never silently corrupted:
+
+| `requestInfo` key | Meaning |
+|---|---|
+| `requestBodyTruncated` | `true` when `requestBody` was truncated (omitted otherwise) |
+| `requestBodyOriginalByteCount` | Original request body size in bytes (only when truncated) |
+| `responseDataTruncated` | `true` when `responseData` was truncated (omitted otherwise) |
+| `responseDataOriginalByteCount` | Original response size in bytes (only when truncated) |
+
+Avoid small limits such as 64 KB if you need to inspect uploaded or downloaded media. A cap that small truncates most images.
+
+### What gets captured
+
+- Request bodies from `dataTask` (`httpBody` or `httpBodyStream`), `uploadTask(with:from:)`, `uploadTask(with:fromFile:)`, and the async `upload(for:from:)` / `upload(for:fromFile:)` APIs, including multipart and other binary uploads.
+- Cookies: if the app didn't set a `Cookie` header and `httpShouldHandleCookies` is `true`, the Kit records the `Cookie` header built from `HTTPCookieStorage.shared`. This is the header the forwarding session sends, so cURL export and Replay in the Mac app reproduce the request faithfully.
 
 ### Mutual TLS (mTLS)
 
@@ -243,5 +263,10 @@ Swift Testing is used for all test suites (`import Testing`, `@Test`).
 
 - **Debug builds only**: This library is intended for development and debugging. Gate its usage via build settings/flags (e.g., `#if DEBUG`) to ensure it's never included in release builds.
 - **Privacy**: Be mindful of sensitive data. Configure redaction appropriately using the delegate pattern or body-size limits.
+- **Known limitations**:
+  - Background sessions (`URLSessionConfiguration.background`) are not captured, because iOS ignores custom `URLProtocol`s for them. Uploads and downloads made through background sessions, including those from some media and storage SDKs, won't appear in the inspector.
+  - Upload progress callbacks (`urlSession(_:task:didSendBodyData:...)`) are not delivered to your app for intercepted requests.
+  - Request bodies are buffered fully in memory while they are forwarded, so very large uploads use memory equal to their size.
+  - Cookies are recorded from, and sent via, `HTTPCookieStorage.shared`. Sessions that use a custom cookie storage aren't reflected.
 - **URLProtocol registration**: The `URLSessionConfigurationInjector.install()` method automatically injects `TrafficURLProtocol` into `URLSessionConfiguration.default` and `.ephemeral`. Custom configurations must manually add the protocol class.
 - **Service discovery**: The inspector automatically discovers Mac receivers on the local network using Bonjour. Ensure your Mac receiver app is running and advertising the `_AppTraffic._tcp` service.
