@@ -66,6 +66,9 @@ private final class InternalSessionDelegate: NSObject, URLSessionDelegate {
 
 public final class TrafficURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) public static weak var eventSink: TrafficURLProtocolEventSink?
+    /// Optional cap on response data emitted in `.data` events, for custom `TrafficURLProtocolEventSink`s.
+    /// `TrafficInspector` doesn't use this: it applies `Configuration.maxBodyBytes` itself so it can report
+    /// original sizes. Leave `nil` when using `TrafficInspector`.
     nonisolated(unsafe) public static var maxBodyBytes: Int?
     
     /// Set before calling `AppTrafficInspectorKit.start()` to handle authentication challenges
@@ -96,24 +99,44 @@ public final class TrafficURLProtocol: URLProtocol, @unchecked Sendable {
         return URLSession(configuration: config, delegate: internalSessionDelegate, delegateQueue: nil)
     }()
     
-    private static func readAllBytes(from stream: InputStream) -> Data {
-        stream.open()
+    /// Reads the stream to EOF. Doesn't gate on `hasBytesAvailable`: producer-fed streams (bound pairs,
+    /// multipart builders) can report no bytes before EOF, which would truncate both the recorded and forwarded body.
+    static func readAllBytes(from stream: InputStream) -> Data {
+        if stream.streamStatus == .notOpen {
+            stream.open()
+        }
         defer { stream.close() }
-        
+
         var data = Data()
-        let bufferSize = 16 * 1024
+        let bufferSize = 64 * 1024
         var buffer = [UInt8](repeating: 0, count: bufferSize)
-        while stream.hasBytesAvailable {
+        while true {
             let read = stream.read(&buffer, maxLength: bufferSize)
             if read > 0 {
                 data.append(buffer, count: read)
             } else {
+                if read < 0 {
+                    DevLogger.logError(message: "Failed reading request body stream: \(stream.streamError?.localizedDescription ?? "unknown error")")
+                }
                 break
             }
         }
         return data
     }
-    
+
+    /// Headers to record for the request. Adds the `Cookie` header the forwarding session will attach from
+    /// `HTTPCookieStorage.shared`, which CFNetwork adds below the URLProtocol layer and would otherwise be invisible.
+    static func recordedHeaders(for request: URLRequest, url: URL) -> [String: String] {
+        var headers = request.allHTTPHeaderFields ?? [:]
+        guard request.httpShouldHandleCookies,
+              request.value(forHTTPHeaderField: "Cookie") == nil,
+              let cookies = HTTPCookieStorage.shared.cookies(for: url),
+              !cookies.isEmpty
+        else { return headers }
+        headers.merge(HTTPCookie.requestHeaderFields(with: cookies)) { existing, _ in existing }
+        return headers
+    }
+
     public override class func canInit(with request: URLRequest) -> Bool {
         // Prevent infinite loops - don't handle requests we've already marked
         if property(forKey: handledRequestKey, in: request) != nil {
@@ -138,7 +161,7 @@ public final class TrafficURLProtocol: URLProtocol, @unchecked Sendable {
         
         // Capture request information
         let method = request.httpMethod ?? "GET"
-        let headers = request.allHTTPHeaderFields ?? [:]
+        let headers = Self.recordedHeaders(for: request, url: url)
         var body: Data? = request.httpBody
         
         // Handle mock:// scheme for testing (safe to read the stream; request won't be sent)
@@ -158,11 +181,11 @@ public final class TrafficURLProtocol: URLProtocol, @unchecked Sendable {
             return
         }
         
-        // If the body was moved into a stream by URLSession, read+restore the stream on the mutable request.
+        // URLSession hands bodies (httpBody, upload-task data/file, streams) to protocols as httpBodyStream.
+        // Read it fully and re-supply it as httpBody so the forwarded request carries the same bytes.
         if body == nil, let stream = mutableRequest.httpBodyStream {
             let streamBody = Self.readAllBytes(from: stream)
             body = streamBody
-            mutableRequest.httpBodyStream = InputStream(data: streamBody)
             mutableRequest.httpBody = streamBody
         }
         
