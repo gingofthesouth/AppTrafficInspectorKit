@@ -24,13 +24,18 @@ public protocol TrafficInspectorDelegate: AnyObject {
     func trafficInspector(_ inspector: TrafficInspector, willSend packet: RequestPacket) -> RequestPacket?
 }
 
-public final class TrafficInspector {
+/// Mutable state is guarded by `queue`; delivery is serialised on `sendQueue`.
+public final class TrafficInspector: @unchecked Sendable {
     public weak var delegate: TrafficInspectorDelegate?
 
     private let configuration: Configuration
     private let browser: ServiceBrowser
     private let client: NetworkClient
     private let queue = DispatchQueue(label: "com.apptrafficinspector.trafficInspector")
+    /// Packets are enqueued here in event order while `queue` is held, so a request's `.start`
+    /// packet can never be sent after its `.response`/`.finish` packets from another thread.
+    private let sendQueue = DispatchQueue(label: "com.apptrafficinspector.trafficInspector.send")
+    private let sendQueueKey = DispatchSpecificKey<Void>()
 
     private struct Accum {
         let packetId: String
@@ -61,6 +66,7 @@ public final class TrafficInspector {
         self.configuration = configuration
         self.client = client
         self.browser = ServiceBrowser(serviceType: configuration.netServiceType, domain: configuration.netServiceDomain)
+        self.sendQueue.setSpecific(key: sendQueueKey, value: ())
         self.browser.delegate = self
         self.browser.startBrowsing()
         TrafficURLProtocol.eventSink = self
@@ -74,7 +80,7 @@ extension TrafficInspector: TrafficURLProtocolEventSink {
         // Phase 1: state mutations + packet build (under lock)
         let key = event.requestId?.uuidString ?? event.url.absoluteString
         let url = event.url
-        let pending: (packet: RequestPacket, delegate: TrafficInspectorDelegate?)? = queue.sync {
+        let built: (packet: RequestPacket, delegate: TrafficInspectorDelegate?)? = queue.sync {
             switch event.kind {
             case .start(let method, let headers, let body):
                 byKey[key] = Accum(
@@ -88,12 +94,12 @@ extension TrafficInspector: TrafficURLProtocolEventSink {
                     body: Data(),
                     receivedByteCount: 0
                 )
-                return buildPacket(for: key, url: url).map { ($0, delegate) }
+                return enqueueDispatch(buildPacket(for: key, url: url).map { ($0, delegate) })
             case .response(let resp):
                 guard var acc = byKey[key] else { return nil }
                 acc.response = resp
                 byKey[key] = acc
-                return buildPacket(for: key, url: url).map { ($0, delegate) }
+                return enqueueDispatch(buildPacket(for: key, url: url).map { ($0, delegate) })
             case .data(let d):
                 guard var acc = byKey[key] else { return nil }
                 acc.receivedByteCount += d.count
@@ -108,19 +114,31 @@ extension TrafficInspector: TrafficURLProtocolEventSink {
                 byKey[key] = acc
                 return nil
             case .finish:
-                let result = buildPacket(for: key, url: url, complete: true).map { ($0, delegate) }
+                let result = enqueueDispatch(buildPacket(for: key, url: url, complete: true).map { ($0, delegate) })
                 byKey.removeValue(forKey: key)
                 return result
             case .failure(let message):
-                let result = buildPacket(for: key, url: url, complete: true, errorMessage: message).map { ($0, delegate) }
+                let result = enqueueDispatch(buildPacket(for: key, url: url, complete: true, errorMessage: message).map { ($0, delegate) })
                 byKey.removeValue(forKey: key)
                 return result
             }
         }
-        // Phase 2: delegate callback + network send (no lock held for delegate)
-        if let pending {
-            dispatchPacket(pending.packet, delegate: pending.delegate)
+        guard built != nil else { return }
+        // Phase 2: wait for this packet (and every earlier one) to be delivered. A re-entrant call
+        // from the delegate is already on sendQueue, so its packet is delivered after the current one.
+        if DispatchQueue.getSpecific(key: sendQueueKey) == nil {
+            sendQueue.sync {}
         }
+    }
+
+    /// Must be called from inside queue.sync so packets are enqueued in event order.
+    private func enqueueDispatch(_ built: (packet: RequestPacket, delegate: TrafficInspectorDelegate?)?) -> (packet: RequestPacket, delegate: TrafficInspectorDelegate?)? {
+        guard let built else { return nil }
+        nonisolated(unsafe) let item = built
+        sendQueue.async { [self] in
+            dispatchPacket(item.packet, delegate: item.delegate)
+        }
+        return built
     }
 
     private func capped(_ data: Data) -> Data {
