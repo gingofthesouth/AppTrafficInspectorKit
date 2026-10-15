@@ -65,7 +65,7 @@ final class TestableInspector: TrafficURLProtocolEventSink {
             client.sendPacket(packet)
         case .data:
             break
-        case .finish:
+        case .finish, .failure:
             break
         }
     }

@@ -41,7 +41,7 @@ public final class TrafficInspector {
         var response: URLResponse?
         var body: Data
     }
-    private var byURL: [URL: Accum] = [:]
+    private var byKey: [String: Accum] = [:]
 
     public private(set) var packetsSent: Int = 0
     public private(set) var packetsDropped: Int = 0
@@ -71,10 +71,12 @@ public final class TrafficInspector {
 extension TrafficInspector: TrafficURLProtocolEventSink {
     public func record(_ event: TrafficEvent) {
         // Phase 1: state mutations + packet build (under lock)
+        let key = event.requestId?.uuidString ?? event.url.absoluteString
+        let url = event.url
         let pending: (packet: RequestPacket, delegate: TrafficInspectorDelegate?)? = queue.sync {
             switch event.kind {
             case .start(let method, let headers, let body):
-                byURL[event.url] = Accum(
+                byKey[key] = Accum(
                     packetId: UUID().uuidString,
                     start: Date(),
                     requestMethod: method,
@@ -83,14 +85,14 @@ extension TrafficInspector: TrafficURLProtocolEventSink {
                     response: nil,
                     body: Data()
                 )
-                return buildPacket(for: event.url).map { ($0, delegate) }
+                return buildPacket(for: key, url: url).map { ($0, delegate) }
             case .response(let resp):
-                guard var acc = byURL[event.url] else { return nil }
+                guard var acc = byKey[key] else { return nil }
                 acc.response = resp
-                byURL[event.url] = acc
-                return buildPacket(for: event.url).map { ($0, delegate) }
+                byKey[key] = acc
+                return buildPacket(for: key, url: url).map { ($0, delegate) }
             case .data(let d):
-                guard var acc = byURL[event.url] else { return nil }
+                guard var acc = byKey[key] else { return nil }
                 if let limit = configuration.maxBodyBytes {
                     let remaining = limit - acc.body.count
                     if remaining > 0 {
@@ -99,11 +101,15 @@ extension TrafficInspector: TrafficURLProtocolEventSink {
                 } else {
                     acc.body.append(d)
                 }
-                byURL[event.url] = acc
+                byKey[key] = acc
                 return nil
             case .finish:
-                let result = buildPacket(for: event.url, complete: true).map { ($0, delegate) }
-                byURL.removeValue(forKey: event.url)
+                let result = buildPacket(for: key, url: url, complete: true).map { ($0, delegate) }
+                byKey.removeValue(forKey: key)
+                return result
+            case .failure(let message):
+                let result = buildPacket(for: key, url: url, complete: true, errorMessage: message).map { ($0, delegate) }
+                byKey.removeValue(forKey: key)
                 return result
             }
         }
@@ -114,8 +120,8 @@ extension TrafficInspector: TrafficURLProtocolEventSink {
     }
 
     /// Builds a RequestPacket from current state. Must be called from inside queue.sync.
-    private func buildPacket(for url: URL, complete: Bool = false) -> RequestPacket? {
-        guard let acc = byURL[url] else { return nil }
+    private func buildPacket(for key: String, url: URL, complete: Bool = false, errorMessage: String? = nil) -> RequestPacket? {
+        guard let acc = byKey[key] else { return nil }
 
         var responseHeaders: [String: String]?
         if let httpResponse = acc.response as? HTTPURLResponse {
@@ -131,6 +137,10 @@ extension TrafficInspector: TrafficURLProtocolEventSink {
             }
         }
 
+        if let errorMessage {
+            responseHeaders = ["X-AppTrafficInspector-Error": errorMessage]
+        }
+
         let info = RequestInfo(
             url: url,
             requestHeaders: acc.requestHeaders,
@@ -138,7 +148,7 @@ extension TrafficInspector: TrafficURLProtocolEventSink {
             requestMethod: acc.requestMethod,
             responseHeaders: responseHeaders,
             responseData: complete ? acc.body : nil,
-            statusCode: (acc.response as? HTTPURLResponse).map { Int($0.statusCode) },
+            statusCode: errorMessage != nil ? 0 : (acc.response as? HTTPURLResponse).map { Int($0.statusCode) },
             startDate: acc.start,
             endDate: complete ? Date() : nil
         )

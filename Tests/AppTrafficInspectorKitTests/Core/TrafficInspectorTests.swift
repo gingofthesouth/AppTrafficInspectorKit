@@ -49,6 +49,42 @@ struct TrafficInspectorTests {
     }
 
     @MainActor @Test
+    func failureEventSendsErrorPacket() throws {
+        let conn = CollectingConnection()
+        let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: RecordingScheduler())
+        client.setService(makeDummyService())
+        let inspector = TrafficInspector(configuration: Configuration(), client: client)
+        let url = URL(string: "https://example.com/fails")!
+        let id = UUID()
+
+        inspector.record(TrafficEvent(requestId: id, url: url, kind: .start(requestMethod: "GET", requestHeaders: [:], requestBody: nil)))
+        inspector.record(TrafficEvent(requestId: id, url: url, kind: .failure(message: "The network connection was lost.")))
+
+        #expect(conn.frames.count == 2)
+        let last = String(decoding: conn.frames[1].dropFirst(8), as: UTF8.self)
+        #expect(last.contains("X-AppTrafficInspector-Error"))
+        #expect(last.contains("The network connection was lost."))
+        #expect(last.contains("\"statusCode\":0"))
+    }
+
+    @MainActor @Test
+    func concurrentRequestsToSameURLAreKeyedByRequestId() throws {
+        let conn = CollectingConnection()
+        let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: RecordingScheduler())
+        client.setService(makeDummyService())
+        let inspector = TrafficInspector(configuration: Configuration(), client: client)
+        let url = URL(string: "https://example.com/same")!
+        let a = UUID(), b = UUID()
+
+        inspector.record(TrafficEvent(requestId: a, url: url, kind: .start(requestMethod: "GET", requestHeaders: [:], requestBody: nil)))
+        inspector.record(TrafficEvent(requestId: b, url: url, kind: .start(requestMethod: "GET", requestHeaders: [:], requestBody: nil)))
+        inspector.record(TrafficEvent(requestId: a, url: url, kind: .finish))
+        inspector.record(TrafficEvent(requestId: b, url: url, kind: .finish))
+
+        #expect(conn.frames.count == 4, "Each request must emit its own start and finish packets")
+    }
+
+    @MainActor @Test
     func delegateFilteringDropsPacketsAndIncrementsCounter() throws {
         let conn = CollectingConnection()
         let scheduler = RecordingScheduler()

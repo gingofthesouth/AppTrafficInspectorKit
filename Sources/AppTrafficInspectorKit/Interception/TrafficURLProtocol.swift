@@ -25,6 +25,8 @@ public enum TrafficEventKind: Equatable {
     case response(URLResponse)
     case data(Data)
     case finish
+    /// The request failed before a response completed (transport/TLS/cancellation). Carries the error description.
+    case failure(message: String)
 }
 
 public struct TrafficEvent: Equatable, @unchecked Sendable {
@@ -78,6 +80,7 @@ public final class TrafficURLProtocol: URLProtocol, @unchecked Sendable {
     private static let handledRequestKey = "TrafficURLProtocolHandledRequest"
     
     private var receivedBytes: Int = 0
+    private let requestId = UUID()
     private var dataTask: URLSessionDataTask?
     private var responseData = Data()
     
@@ -145,7 +148,7 @@ public final class TrafficURLProtocol: URLProtocol, @unchecked Sendable {
             }
             
             // Record start event with request info
-            Self.eventSink?.record(TrafficEvent(url: url, kind: .start(requestMethod: method, requestHeaders: headers, requestBody: body)))
+            Self.eventSink?.record(TrafficEvent(requestId: requestId, url: url, kind: .start(requestMethod: method, requestHeaders: headers, requestBody: body)))
             handleMockRequest(url: url)
             return
         }
@@ -164,7 +167,7 @@ public final class TrafficURLProtocol: URLProtocol, @unchecked Sendable {
         }
         
         // Record start event with request info
-        Self.eventSink?.record(TrafficEvent(url: url, kind: .start(requestMethod: method, requestHeaders: headers, requestBody: body)))
+        Self.eventSink?.record(TrafficEvent(requestId: requestId, url: url, kind: .start(requestMethod: method, requestHeaders: headers, requestBody: body)))
         
         URLProtocol.setProperty(true, forKey: Self.handledRequestKey, in: mutableRequest)
         
@@ -173,13 +176,13 @@ public final class TrafficURLProtocol: URLProtocol, @unchecked Sendable {
             
             if let error = error {
                 self.client?.urlProtocol(self, didFailWithError: error)
-                Self.eventSink?.record(TrafficEvent(url: url, kind: .finish))
+                Self.eventSink?.record(TrafficEvent(requestId: self.requestId, url: url, kind: .failure(message: error.localizedDescription)))
                 return
             }
             
             if let response = response {
                 self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-                Self.eventSink?.record(TrafficEvent(url: url, kind: .response(response)))
+                Self.eventSink?.record(TrafficEvent(requestId: requestId, url: url, kind: .response(response)))
             }
             
             if let data = data {
@@ -192,12 +195,12 @@ public final class TrafficURLProtocol: URLProtocol, @unchecked Sendable {
                     self.client?.urlProtocol(self, didLoad: data)
                 }
                 if !limitedData.isEmpty {
-                    Self.eventSink?.record(TrafficEvent(url: url, kind: .data(Data(limitedData))))
+                    Self.eventSink?.record(TrafficEvent(requestId: requestId, url: url, kind: .data(Data(limitedData))))
                 }
             }
             
             self.client?.urlProtocolDidFinishLoading(self)
-            Self.eventSink?.record(TrafficEvent(url: url, kind: .finish))
+            Self.eventSink?.record(TrafficEvent(requestId: requestId, url: url, kind: .finish))
         }
         
         dataTask?.resume()
@@ -207,7 +210,7 @@ public final class TrafficURLProtocol: URLProtocol, @unchecked Sendable {
         // Synthesize a response and small body for mock://
         let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type":"text/plain"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        Self.eventSink?.record(TrafficEvent(url: url, kind: .response(response)))
+        Self.eventSink?.record(TrafficEvent(requestId: requestId, url: url, kind: .response(response)))
         
         let fullBody = Data([0x41, 0x42, 0x43, 0x44, 0x45])
         let limit = Self.maxBodyBytes ?? fullBody.count
@@ -217,11 +220,11 @@ public final class TrafficURLProtocol: URLProtocol, @unchecked Sendable {
             client?.urlProtocol(self, didLoad: fullBody)
         }
         if !limitedData.isEmpty {
-            Self.eventSink?.record(TrafficEvent(url: url, kind: .data(Data(limitedData))))
+            Self.eventSink?.record(TrafficEvent(requestId: requestId, url: url, kind: .data(Data(limitedData))))
         }
         
         client?.urlProtocolDidFinishLoading(self)
-        Self.eventSink?.record(TrafficEvent(url: url, kind: .finish))
+        Self.eventSink?.record(TrafficEvent(requestId: requestId, url: url, kind: .finish))
     }
     
     public override func stopLoading() {
