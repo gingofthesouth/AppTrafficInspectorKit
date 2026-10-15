@@ -33,10 +33,17 @@ public var deviceDisplayName: String {
 }
 
 public struct Configuration {
+    /// Default per-body capture limit (8 MiB). Request and response bodies are each capped at this size so a
+    /// base64-encoded packet stays under the Mac app's 25 MiB per-transaction limit. Truncated bodies are flagged
+    /// on the wire (`requestBodyTruncated` / `responseDataTruncated`).
+    public static let defaultMaxBodyBytes = 8 * 1024 * 1024
+
     public var netServiceType: String
     public var netServiceDomain: String
     public var project: ProjectInfo
     public var device: DeviceInfo
+    /// Maximum bytes captured per request body and per response body. `nil` means unlimited.
+    /// This only limits what is sent to the inspector; the app's traffic is never truncated.
     public var maxBodyBytes: Int?
 
     public init(
@@ -44,7 +51,7 @@ public struct Configuration {
         netServiceDomain: String = "",
         project: ProjectInfo = ProjectInfo(projectName: Bundle.main.infoDictionary?["CFBundleName"] as? String ?? "App"),
         device: DeviceInfo = DeviceInfo(deviceId: UUID().uuidString, deviceName: deviceDisplayName, deviceDescription: ProcessInfo.processInfo.operatingSystemVersionString),
-        maxBodyBytes: Int? = nil
+        maxBodyBytes: Int? = Configuration.defaultMaxBodyBytes
     ) {
         self.netServiceType = netServiceType
         self.netServiceDomain = netServiceDomain

@@ -26,6 +26,7 @@ struct ConfigurationTests {
         #expect(UUID(uuidString: config2.device.deviceId) != nil)
     }
     
+    #if os(macOS)
     @Test
     func defaultInitialization_usesHostCurrentForDeviceName() throws {
         let config = Configuration()
@@ -33,6 +34,7 @@ struct ConfigurationTests {
         let expectedName = Host.current().localizedName ?? "Device"
         #expect(config.device.deviceName == expectedName)
     }
+    #endif
     
     @Test
     func defaultInitialization_usesProcessInfoForDeviceDescription() throws {
@@ -64,6 +66,12 @@ struct ConfigurationTests {
         #expect(config.maxBodyBytes == 256 * 1024)
     }
     
+    @Test
+    func maxBodyBytes_defaultsTo8MiB() throws {
+        #expect(Configuration.defaultMaxBodyBytes == 8 * 1024 * 1024)
+        #expect(Configuration().maxBodyBytes == 8 * 1024 * 1024)
+    }
+
     @Test
     func maxBodyBytes_nilVsSetValue() throws {
         let configNil = Configuration(maxBodyBytes: nil)

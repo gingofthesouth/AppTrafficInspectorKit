@@ -40,6 +40,52 @@ struct RequestInfoCodableTests {
 
         let decoded = try PacketJSON.decoder.decode(RequestInfo.self, from: jsonWithString)
         #expect(decoded.statusCode == 404)
+        #expect(decoded.requestBodyTruncated == false)
+        #expect(decoded.requestBodyOriginalByteCount == nil)
+        #expect(decoded.responseDataTruncated == false)
+        #expect(decoded.responseDataOriginalByteCount == nil)
+    }
+
+    @Test
+    func truncationFields_encodedWithExactKeys_whenTruncated() throws {
+        let info = RequestInfo(
+            url: URL(string: "https://example.com/upload")!,
+            requestHeaders: [:],
+            requestBody: Data([1, 2]),
+            requestMethod: "POST",
+            responseData: Data([3]),
+            startDate: Date(timeIntervalSince1970: 1_700_000_000),
+            requestBodyTruncated: true,
+            requestBodyOriginalByteCount: 10,
+            responseDataTruncated: true,
+            responseDataOriginalByteCount: 20
+        )
+        let data = try PacketJSON.encoder.encode(info)
+        let obj = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(obj["requestBodyTruncated"] as? Bool == true)
+        #expect(obj["requestBodyOriginalByteCount"] as? Int == 10)
+        #expect(obj["responseDataTruncated"] as? Bool == true)
+        #expect(obj["responseDataOriginalByteCount"] as? Int == 20)
+
+        let decoded = try PacketJSON.decoder.decode(RequestInfo.self, from: data)
+        #expect(decoded == info)
+    }
+
+    @Test
+    func truncationFields_omitted_whenNotTruncated() throws {
+        let info = RequestInfo(
+            url: URL(string: "https://example.com/small")!,
+            requestHeaders: [:],
+            requestBody: Data([1]),
+            requestMethod: "POST",
+            startDate: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let data = try PacketJSON.encoder.encode(info)
+        let obj = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(obj["requestBodyTruncated"] == nil)
+        #expect(obj["requestBodyOriginalByteCount"] == nil)
+        #expect(obj["responseDataTruncated"] == nil)
+        #expect(obj["responseDataOriginalByteCount"] == nil)
     }
 }
 

@@ -57,6 +57,7 @@ struct TrafficURLProtocolTests {
         let sink = RecordingSink()
         TrafficURLProtocol.eventSink = sink
         TrafficURLProtocol.maxBodyBytes = 3
+        defer { TrafficURLProtocol.maxBodyBytes = nil }
 
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [TrafficURLProtocol.self]
@@ -152,6 +153,7 @@ struct TrafficURLProtocolTests {
         let sink = RecordingSink()
         TrafficURLProtocol.eventSink = sink
         TrafficURLProtocol.maxBodyBytes = 50
+        defer { TrafficURLProtocol.maxBodyBytes = nil }
 
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [TrafficURLProtocol.self]

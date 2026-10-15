@@ -361,6 +361,82 @@ struct TrafficInspectorTests {
             #expect(packet.requestInfo.responseHeaders?["X-Custom"] == "value")
         }
     }
+
+    private func decodePacket(_ frame: Data) throws -> RequestPacket {
+        try PacketJSON.decoder.decode(RequestPacket.self, from: Data(frame.dropFirst(8)))
+    }
+
+    @MainActor @Test
+    func bodiesOverCap_areTruncatedAndFlagged() throws {
+        let conn = CollectingConnection()
+        let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: RecordingScheduler())
+        client.setService(makeDummyService())
+        let inspector = TrafficInspector(configuration: Configuration(maxBodyBytes: 10), client: client)
+        let url = URL(string: "https://example.com/upload")!
+        let id = UUID()
+
+        inspector.record(TrafficEvent(requestId: id, url: url, kind: .start(requestMethod: "POST", requestHeaders: [:], requestBody: Data(repeating: 1, count: 25))))
+        inspector.record(TrafficEvent(requestId: id, url: url, kind: .data(Data(repeating: 2, count: 8))))
+        inspector.record(TrafficEvent(requestId: id, url: url, kind: .data(Data(repeating: 3, count: 8))))
+        inspector.record(TrafficEvent(requestId: id, url: url, kind: .finish))
+
+        let start = try decodePacket(conn.frames[0]).requestInfo
+        #expect(start.requestBody?.count == 10)
+        #expect(start.requestBodyTruncated == true)
+        #expect(start.requestBodyOriginalByteCount == 25)
+        #expect(start.responseDataTruncated == false)
+
+        let finish = try decodePacket(try #require(conn.frames.last)).requestInfo
+        #expect(finish.requestBody == Data(repeating: 1, count: 10))
+        #expect(finish.requestBodyTruncated == true)
+        #expect(finish.requestBodyOriginalByteCount == 25)
+        #expect(finish.responseData == Data(repeating: 2, count: 8) + Data(repeating: 3, count: 2))
+        #expect(finish.responseDataTruncated == true)
+        #expect(finish.responseDataOriginalByteCount == 16)
+    }
+
+    @MainActor @Test
+    func bodiesWithinCap_areNotFlagged() throws {
+        let conn = CollectingConnection()
+        let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: RecordingScheduler())
+        client.setService(makeDummyService())
+        let inspector = TrafficInspector(configuration: Configuration(maxBodyBytes: 10), client: client)
+        let url = URL(string: "https://example.com/exact")!
+        let id = UUID()
+
+        inspector.record(TrafficEvent(requestId: id, url: url, kind: .start(requestMethod: "POST", requestHeaders: [:], requestBody: Data(repeating: 1, count: 10))))
+        inspector.record(TrafficEvent(requestId: id, url: url, kind: .data(Data(repeating: 2, count: 10))))
+        inspector.record(TrafficEvent(requestId: id, url: url, kind: .finish))
+
+        let finish = try decodePacket(try #require(conn.frames.last)).requestInfo
+        #expect(finish.requestBody?.count == 10)
+        #expect(finish.responseData?.count == 10)
+        #expect(finish.requestBodyTruncated == false)
+        #expect(finish.requestBodyOriginalByteCount == nil)
+        #expect(finish.responseDataTruncated == false)
+        #expect(finish.responseDataOriginalByteCount == nil)
+    }
+
+    @MainActor @Test
+    func nilCap_meansUnlimited() throws {
+        let conn = CollectingConnection()
+        let client = NetworkClient(connectionFactory: { _ in conn }, scheduler: RecordingScheduler())
+        client.setService(makeDummyService())
+        let inspector = TrafficInspector(configuration: Configuration(maxBodyBytes: nil), client: client)
+        let url = URL(string: "https://example.com/unlimited")!
+        let id = UUID()
+        let big = Data(repeating: 9, count: Configuration.defaultMaxBodyBytes + 1)
+
+        inspector.record(TrafficEvent(requestId: id, url: url, kind: .start(requestMethod: "POST", requestHeaders: [:], requestBody: big)))
+        inspector.record(TrafficEvent(requestId: id, url: url, kind: .data(big)))
+        inspector.record(TrafficEvent(requestId: id, url: url, kind: .finish))
+
+        let finish = try decodePacket(try #require(conn.frames.last)).requestInfo
+        #expect(finish.requestBody?.count == big.count)
+        #expect(finish.responseData?.count == big.count)
+        #expect(finish.requestBodyTruncated == false)
+        #expect(finish.responseDataTruncated == false)
+    }
 }
 
 @MainActor

@@ -30,6 +30,14 @@ public struct RequestInfo: Codable, Equatable {
     public let statusCode: Int?
     public let startDate: Date
     public let endDate: Date?
+    /// True when `requestBody` was truncated by the Kit (see `Configuration.maxBodyBytes`).
+    public let requestBodyTruncated: Bool
+    /// Size of the request body before truncation. Only set when `requestBodyTruncated` is true.
+    public let requestBodyOriginalByteCount: Int?
+    /// True when `responseData` was truncated by the Kit (see `Configuration.maxBodyBytes`).
+    public let responseDataTruncated: Bool
+    /// Size of the response data before truncation. Only set when `responseDataTruncated` is true.
+    public let responseDataOriginalByteCount: Int?
 
     public init(
         url: URL,
@@ -40,7 +48,11 @@ public struct RequestInfo: Codable, Equatable {
         responseData: Data? = nil,
         statusCode: Int? = nil,
         startDate: Date,
-        endDate: Date? = nil
+        endDate: Date? = nil,
+        requestBodyTruncated: Bool = false,
+        requestBodyOriginalByteCount: Int? = nil,
+        responseDataTruncated: Bool = false,
+        responseDataOriginalByteCount: Int? = nil
     ) {
         self.url = url
         self.requestHeaders = requestHeaders
@@ -51,6 +63,10 @@ public struct RequestInfo: Codable, Equatable {
         self.statusCode = statusCode
         self.startDate = startDate
         self.endDate = endDate
+        self.requestBodyTruncated = requestBodyTruncated
+        self.requestBodyOriginalByteCount = requestBodyOriginalByteCount
+        self.responseDataTruncated = responseDataTruncated
+        self.responseDataOriginalByteCount = responseDataOriginalByteCount
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -63,6 +79,10 @@ public struct RequestInfo: Codable, Equatable {
         case statusCode
         case startDate
         case endDate
+        case requestBodyTruncated
+        case requestBodyOriginalByteCount
+        case responseDataTruncated
+        case responseDataOriginalByteCount
     }
 
     public init(from decoder: Decoder) throws {
@@ -82,6 +102,10 @@ public struct RequestInfo: Codable, Equatable {
         }
         self.startDate = try c.decode(Date.self, forKey: .startDate)
         self.endDate = try c.decodeIfPresent(Date.self, forKey: .endDate)
+        self.requestBodyTruncated = (try? c.decodeIfPresent(Bool.self, forKey: .requestBodyTruncated)) ?? false
+        self.requestBodyOriginalByteCount = try? c.decodeIfPresent(Int.self, forKey: .requestBodyOriginalByteCount)
+        self.responseDataTruncated = (try? c.decodeIfPresent(Bool.self, forKey: .responseDataTruncated)) ?? false
+        self.responseDataOriginalByteCount = try? c.decodeIfPresent(Int.self, forKey: .responseDataOriginalByteCount)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -95,5 +119,13 @@ public struct RequestInfo: Codable, Equatable {
         try c.encodeIfPresent(statusCode, forKey: .statusCode)
         try c.encode(startDate, forKey: .startDate)
         try c.encodeIfPresent(endDate, forKey: .endDate)
+        if requestBodyTruncated {
+            try c.encode(true, forKey: .requestBodyTruncated)
+            try c.encodeIfPresent(requestBodyOriginalByteCount, forKey: .requestBodyOriginalByteCount)
+        }
+        if responseDataTruncated {
+            try c.encode(true, forKey: .responseDataTruncated)
+            try c.encodeIfPresent(responseDataOriginalByteCount, forKey: .responseDataOriginalByteCount)
+        }
     }
 }

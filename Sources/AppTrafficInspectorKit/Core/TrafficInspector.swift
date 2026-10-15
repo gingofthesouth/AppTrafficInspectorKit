@@ -38,8 +38,10 @@ public final class TrafficInspector {
         var requestMethod: String
         var requestHeaders: [String: String]
         var requestBody: Data?
+        var requestBodyOriginalByteCount: Int
         var response: URLResponse?
         var body: Data
+        var receivedByteCount: Int
     }
     private var byKey: [String: Accum] = [:]
 
@@ -62,7 +64,6 @@ public final class TrafficInspector {
         self.browser.delegate = self
         self.browser.startBrowsing()
         TrafficURLProtocol.eventSink = self
-        TrafficURLProtocol.maxBodyBytes = configuration.maxBodyBytes
         _ = forwardingSession
     }
 
@@ -81,9 +82,11 @@ extension TrafficInspector: TrafficURLProtocolEventSink {
                     start: Date(),
                     requestMethod: method,
                     requestHeaders: headers,
-                    requestBody: body,
+                    requestBody: body.map(capped),
+                    requestBodyOriginalByteCount: body?.count ?? 0,
                     response: nil,
-                    body: Data()
+                    body: Data(),
+                    receivedByteCount: 0
                 )
                 return buildPacket(for: key, url: url).map { ($0, delegate) }
             case .response(let resp):
@@ -93,6 +96,7 @@ extension TrafficInspector: TrafficURLProtocolEventSink {
                 return buildPacket(for: key, url: url).map { ($0, delegate) }
             case .data(let d):
                 guard var acc = byKey[key] else { return nil }
+                acc.receivedByteCount += d.count
                 if let limit = configuration.maxBodyBytes {
                     let remaining = limit - acc.body.count
                     if remaining > 0 {
@@ -119,6 +123,11 @@ extension TrafficInspector: TrafficURLProtocolEventSink {
         }
     }
 
+    private func capped(_ data: Data) -> Data {
+        guard let limit = configuration.maxBodyBytes, data.count > limit else { return data }
+        return Data(data.prefix(max(0, limit)))
+    }
+
     /// Builds a RequestPacket from current state. Must be called from inside queue.sync.
     private func buildPacket(for key: String, url: URL, complete: Bool = false, errorMessage: String? = nil) -> RequestPacket? {
         guard let acc = byKey[key] else { return nil }
@@ -141,6 +150,8 @@ extension TrafficInspector: TrafficURLProtocolEventSink {
             responseHeaders = ["X-AppTrafficInspector-Error": errorMessage]
         }
 
+        let requestTruncated = (acc.requestBody?.count ?? 0) < acc.requestBodyOriginalByteCount
+        let responseTruncated = complete && acc.body.count < acc.receivedByteCount
         let info = RequestInfo(
             url: url,
             requestHeaders: acc.requestHeaders,
@@ -150,7 +161,11 @@ extension TrafficInspector: TrafficURLProtocolEventSink {
             responseData: complete ? acc.body : nil,
             statusCode: errorMessage != nil ? 0 : (acc.response as? HTTPURLResponse).map { Int($0.statusCode) },
             startDate: acc.start,
-            endDate: complete ? Date() : nil
+            endDate: complete ? Date() : nil,
+            requestBodyTruncated: requestTruncated,
+            requestBodyOriginalByteCount: requestTruncated ? acc.requestBodyOriginalByteCount : nil,
+            responseDataTruncated: responseTruncated,
+            responseDataOriginalByteCount: responseTruncated ? acc.receivedByteCount : nil
         )
         return RequestPacket(packetId: acc.packetId, requestInfo: info, project: configuration.project, device: configuration.device)
     }
