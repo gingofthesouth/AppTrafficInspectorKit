@@ -26,9 +26,22 @@ final class DefaultConnection: ConnectionType, @unchecked Sendable {
     private var isReadyValue = false
     private let queue = DispatchQueue(label: "com.apptrafficinspector.connection")
 
+    private let callbackLock = NSLock()
+    private var onReadyValue: (() -> Void)?
+    private var onFailureValue: (() -> Void)?
+
     /// Callback fired (on main queue) when the connection transitions to `.ready`.
-    nonisolated(unsafe) var onReady: (() -> Void)?
-    
+    var onReady: (() -> Void)? {
+        get { callbackLock.withLock { onReadyValue } }
+        set { callbackLock.withLock { onReadyValue = newValue } }
+    }
+
+    /// Callback fired (on main queue) once when the connection fails, is cancelled, or the peer closes it.
+    var onFailure: (() -> Void)? {
+        get { callbackLock.withLock { onFailureValue } }
+        set { callbackLock.withLock { onFailureValue = newValue } }
+    }
+
     var isReady: Bool {
         queue.sync { isReadyValue }
     }
@@ -48,12 +61,16 @@ final class DefaultConnection: ConnectionType, @unchecked Sendable {
                 DevLogger.logError(message: "Connection ready to \(serviceName) via \(interfaceDesc)")
                 self.queue.async { self.isReadyValue = true }
                 DispatchQueue.main.async { self.onReady?() }
+                self.watchForPeerClose()
             case .failed(let error):
                 DevLogger.logError(message: "Connection failed: \(error)")
                 self.queue.async { self.isReadyValue = false }
+                self.connection.cancel()
+                self.notifyFailure()
             case .cancelled:
                 DevLogger.logError(message: "Connection cancelled")
                 self.queue.async { self.isReadyValue = false }
+                self.notifyFailure()
             case .waiting(let error):
                 DevLogger.logError(message: "Connection waiting: \(error)")
                 self.queue.async { self.isReadyValue = false }
@@ -64,6 +81,35 @@ final class DefaultConnection: ConnectionType, @unchecked Sendable {
         connection.start(queue: queue)
     }
     
+    func cancel() {
+        connection.cancel()
+    }
+
+    /// The receiver never sends data, so a completed or failed receive means it closed the
+    /// connection (for example after rejecting an undecodable frame).
+    private func watchForPeerClose() {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1024) { [weak self] _, _, isComplete, error in
+            guard let self else { return }
+            if isComplete || error != nil {
+                DevLogger.logError(message: "Connection closed by receiver\(error.map { ": \($0)" } ?? "")")
+                self.queue.async { self.isReadyValue = false }
+                self.connection.cancel()
+                self.notifyFailure()
+            } else {
+                self.watchForPeerClose()
+            }
+        }
+    }
+
+    private var failureNotified = false
+
+    /// Runs on `queue`; hops to main so the handler can synchronously query `isReady`.
+    private func notifyFailure() {
+        guard !failureNotified else { return }
+        failureNotified = true
+        DispatchQueue.main.async { self.onFailure?() }
+    }
+
     func send(_ data: Data) {
         connection.send(content: data, completion: .contentProcessed { error in
             if let error = error {
